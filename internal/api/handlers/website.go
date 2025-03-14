@@ -32,7 +32,6 @@ type CreateWebsiteRequest struct {
 	Description string `json:"description"`
 }
 
-// CreateWebsite handles the creation of a new website
 // @Summary Create a new website
 // @Description Create a new website record
 // @Tags websites
@@ -85,7 +84,6 @@ func (h *WebsiteHandler) CreateWebsite(c *fiber.Ctx) error {
 	})
 }
 
-// ListWebsites returns a list of all websites
 // @Summary List all websites
 // @Description Get a list of all websites in the system
 // @Tags websites

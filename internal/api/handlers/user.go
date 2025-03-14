@@ -36,7 +36,6 @@ type UpdateRoleRequest struct {
 	RoleID uint `json:"role_id" validate:"required"`
 }
 
-// ListUsers returns a list of all users
 // @Summary List all users
 // @Description Get a list of all users in the system
 // @Tags users
@@ -83,7 +82,6 @@ func (h *UserHandler) ListUsers(c *fiber.Ctx) error {
 	})
 }
 
-// GetUser returns information about a specific user
 // @Summary Get user details
 // @Description Get details of a specific user
 // @Tags users

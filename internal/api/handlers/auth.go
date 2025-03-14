@@ -47,7 +47,6 @@ type TokenResponse struct {
 	ExpiresIn   int    `json:"expires_in"`
 }
 
-// Register handles user registration
 // @Summary Register a new user
 // @Description Register a new user in the system
 // @Tags auth
@@ -128,7 +127,6 @@ func (h *AuthHandler) Register(c *fiber.Ctx) error {
 	})
 }
 
-// Login handles user authentication
 // @Summary User login
 // @Description Authenticate a user and return JWT token
 // @Tags auth

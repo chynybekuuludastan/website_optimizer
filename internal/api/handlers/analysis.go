@@ -40,7 +40,6 @@ func NewAnalysisHandler(db *database.DatabaseClient, redisClient *database.Redis
 	}
 }
 
-// CreateAnalysis handles the creation of a new website analysis
 // @Summary Create a new website analysis
 // @Description Starts an analysis of the provided website URL
 // @Tags analysis
@@ -204,7 +203,6 @@ func generateRecommendations(db *database.DatabaseClient, analysisID uuid.UUID, 
 	// Here, add more recommendations based on security and accessibility results
 }
 
-// GetAnalysis returns the details of a specific analysis
 // @Summary Get analysis details
 // @Description Retrieves details of a specific analysis
 // @Tags analysis

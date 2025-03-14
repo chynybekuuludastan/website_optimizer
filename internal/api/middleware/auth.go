@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -22,6 +23,8 @@ type JWTClaims struct {
 // JWTMiddleware creates JWT auth middleware
 func JWTMiddleware(cfg *config.Config) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		fmt.Printf("Auth header: %s\n", c.Get("Authorization"))
+
 		authHeader := c.Get("Authorization")
 		if authHeader == "" {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
@@ -31,16 +34,13 @@ func JWTMiddleware(cfg *config.Config) fiber.Handler {
 		}
 
 		// Parse the token from the Authorization header
-		tokenString := ""
-		parts := strings.Split(authHeader, " ")
-		if len(parts) == 2 && parts[0] == "Bearer" {
-			tokenString = parts[1]
-		} else {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"success": false,
-				"error":   "Invalid authorization format",
-			})
+		tokenString := authHeader
+
+		// Check if it has Bearer prefix, and if so, extract the token
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenString = authHeader[7:] // Skip "Bearer " prefix
 		}
+		// If no Bearer prefix, use the header value as is for the token
 
 		// Parse and validate the token
 		claims := &JWTClaims{}
