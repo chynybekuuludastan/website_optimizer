@@ -1,0 +1,36 @@
+# Бинарные файлы и временные файлы
+*.exe
+*.out
+*.so
+*.dll
+
+# Файлы кэша Go
+*.log
+*.test
+*.prof
+*.sum
+*.cover
+
+# Директории кэша Go
+/tmp/
+bin/
+obj/
+dist/
+build/
+
+# Модули Go
+vendor/
+go.sum
+
+# Системные файлы и IDE
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.swn
+.idea/
+.vscode/
+*.iml
+
+# Конфигурационные файлы
+.env
