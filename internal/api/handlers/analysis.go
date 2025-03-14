@@ -41,6 +41,18 @@ func NewAnalysisHandler(db *database.DatabaseClient, redisClient *database.Redis
 }
 
 // CreateAnalysis handles the creation of a new website analysis
+// @Summary Create a new website analysis
+// @Description Starts an analysis of the provided website URL
+// @Tags analysis
+// @Accept json
+// @Produce json
+// @Param analysis body AnalysisRequest true "Analysis Request"
+// @Success 201 {object} map[string]interface{} "Analysis created successfully"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /analysis [post]
 func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 	// Get user ID from context
 	userID := c.Locals("userID").(uuid.UUID)
@@ -193,6 +205,19 @@ func generateRecommendations(db *database.DatabaseClient, analysisID uuid.UUID, 
 }
 
 // GetAnalysis returns the details of a specific analysis
+// @Summary Get analysis details
+// @Description Retrieves details of a specific analysis
+// @Tags analysis
+// @Accept json
+// @Produce json
+// @Param id path string true "Analysis ID"
+// @Success 200 {object} map[string]interface{} "Analysis details"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Forbidden"
+// @Failure 404 {object} map[string]interface{} "Analysis not found"
+// @Security BearerAuth
+// @Router /analysis/{id} [get]
 func (h *AnalysisHandler) GetAnalysis(c *fiber.Ctx) error {
 	id := c.Params("id")
 	analysisID, err := uuid.Parse(id)

@@ -37,6 +37,17 @@ type UpdateRoleRequest struct {
 }
 
 // ListUsers returns a list of all users
+// @Summary List all users
+// @Description Get a list of all users in the system
+// @Tags users
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Users list"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Forbidden"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /users [get]
 func (h *UserHandler) ListUsers(c *fiber.Ctx) error {
 	var users []models.User
 	if err := h.DB.Preload("Role").Find(&users).Error; err != nil {
@@ -73,6 +84,19 @@ func (h *UserHandler) ListUsers(c *fiber.Ctx) error {
 }
 
 // GetUser returns information about a specific user
+// @Summary Get user details
+// @Description Get details of a specific user
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param id path string true "User ID"
+// @Success 200 {object} map[string]interface{} "User details"
+// @Failure 400 {object} map[string]interface{} "Invalid user ID"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Forbidden"
+// @Failure 404 {object} map[string]interface{} "User not found"
+// @Security BearerAuth
+// @Router /users/{id} [get]
 func (h *UserHandler) GetUser(c *fiber.Ctx) error {
 	id := c.Params("id")
 	userID, err := uuid.Parse(id)

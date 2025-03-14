@@ -17,6 +17,25 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/database"
 )
 
+// @title Website Analyzer API
+// @version 1.0
+// @description API for analyzing websites and providing optimization recommendations
+// @termsOfService http://swagger.io/terms/
+
+// @contact.name API Support
+// @contact.email support@websiteanalyzer.com
+
+// @license.name MIT
+// @license.url https://opensource.org/licenses/MIT
+
+// @host localhost:8080
+// @BasePath /api
+// @schemes http https
+
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+// @description Type "Bearer" followed by a space and JWT token
 func main() {
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
@@ -62,6 +81,9 @@ func main() {
 		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
 		AllowMethods: "GET, POST, PUT, DELETE, PATCH",
 	}))
+
+	// Setup Swagger
+	api.SetupSwagger(app)
 
 	// Setup routes
 	api.SetupRoutes(app, db, redisClient, cfg)

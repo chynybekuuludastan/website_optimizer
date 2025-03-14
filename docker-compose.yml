@@ -32,24 +32,25 @@ services:
       timeout: 5s
       retries: 5
 
-  # Uncomment this section if you want to containerize the Go application too
-  # app:
-  #   build: .
-  #   container_name: website-analyzer-app
-  #   restart: unless-stopped
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #   environment:
-  #     PORT: 8080
-  #     POSTGRES_URI: postgres://postgres:postgres@postgres:5432/website_analyzer?sslmode=disable
-  #     REDIS_URI: redis://redis:6379/0
-  #     JWT_SECRET: your-secret-key
-  #     OPENAI_API_KEY: your-openai-api-key
-  #   ports:
-  #     - "8080:8080"
+  app:
+    build: .
+    container_name: website-analyzer-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PORT: 8080
+      POSTGRES_URI: postgres://postgres:postgres@postgres:5432/website_analyzer?sslmode=disable
+      REDIS_URI: redis://redis:6379/0
+      JWT_SECRET: your-secret-key
+      OPENAI_API_KEY: your-openai-api-key
+    ports:
+      - '8080:8080'
+    volumes:
+      - ./docs:/app/docs
 
 volumes:
   postgres_data:

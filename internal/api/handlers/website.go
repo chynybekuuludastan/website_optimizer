@@ -33,6 +33,18 @@ type CreateWebsiteRequest struct {
 }
 
 // CreateWebsite handles the creation of a new website
+// @Summary Create a new website
+// @Description Create a new website record
+// @Tags websites
+// @Accept json
+// @Produce json
+// @Param website body CreateWebsiteRequest true "Website Information"
+// @Success 201 {object} map[string]interface{} "Website created"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /websites [post]
 func (h *WebsiteHandler) CreateWebsite(c *fiber.Ctx) error {
 	req := new(CreateWebsiteRequest)
 	if err := c.BodyParser(req); err != nil {
@@ -74,6 +86,16 @@ func (h *WebsiteHandler) CreateWebsite(c *fiber.Ctx) error {
 }
 
 // ListWebsites returns a list of all websites
+// @Summary List all websites
+// @Description Get a list of all websites in the system
+// @Tags websites
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Websites list"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /websites [get]
 func (h *WebsiteHandler) ListWebsites(c *fiber.Ctx) error {
 	var websites []models.Website
 	if err := h.DB.Find(&websites).Error; err != nil {

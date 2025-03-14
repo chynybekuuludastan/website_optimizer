@@ -12,6 +12,7 @@
 - Интеграция с PostgreSQL (через GORM) и Redis
 - WebSocket для обновлений в реальном времени
 - Управление пользователями с ролевым контролем доступа
+- API документация через Swagger
 
 ## Требования
 
@@ -27,6 +28,7 @@ project/
 ├── cmd/
 │   └── server/
 │       └── main.go            # Точка входа
+├── docs/                      # Swagger документация (автогенерируемая)
 ├── internal/
 │   ├── api/                   # Обработчики API и маршрутизация
 │   ├── config/                # Конфигурация приложения
@@ -36,6 +38,7 @@ project/
 │   └── service/               # Бизнес-логика приложения
 ├── pkg/
 │   └── utils/                 # Вспомогательные утилиты
+├── scripts/                   # Скрипты для разработки
 ├── .env                       # Переменные окружения
 └── go.mod                     # Зависимости Go
 ```
@@ -76,8 +79,15 @@ project/
    ```
 
 4. Создайте базу данных в PostgreSQL:
+
    ```sql
    CREATE DATABASE website_analyzer;
+   ```
+
+5. Сгенерируйте Swagger документацию:
+
+   ```bash
+   bash scripts/generate-swagger.sh
    ```
 
 ### Запуск
@@ -89,10 +99,19 @@ project/
    ```
 
 2. API будет доступно по адресу: `http://localhost:8080/api`
+3. Swagger документация будет доступна по адресу: `http://localhost:8080/swagger`
 
-## API Эндпоинты
+## API Документация
 
-### Аутентификация
+API полностью документировано с использованием Swagger. Вы можете:
+
+- Просмотреть полную документацию API по адресу `http://localhost:8080/swagger`
+- Тестировать API напрямую через Swagger UI
+- Экспортировать документацию в форматы JSON или YAML
+
+### Основные эндпоинты
+
+#### Аутентификация
 
 - `POST /api/auth/register` - Регистрация нового пользователя
 - `POST /api/auth/login` - Вход в систему и получение JWT-токена
@@ -100,7 +119,7 @@ project/
 - `POST /api/auth/refresh` - Обновление JWT-токена
 - `POST /api/auth/logout` - Выход из системы
 
-### Пользователи
+#### Пользователи
 
 - `GET /api/users` - Получение списка пользователей (Admin)
 - `GET /api/users/:id` - Получение информации о пользователе
@@ -108,7 +127,7 @@ project/
 - `DELETE /api/users/:id` - Удаление пользователя
 - `PATCH /api/users/:id/role` - Изменение роли пользователя (Admin)
 
-### Анализ сайтов
+#### Анализ сайтов
 
 - `POST /api/analysis` - Создание нового анализа (отправка URL)
 - `GET /api/analysis` - Получение списка анализов
@@ -117,21 +136,21 @@ project/
 - `DELETE /api/analysis/:id` - Удаление анализа
 - `PATCH /api/analysis/:id/public` - Изменение публичного статуса анализа
 
-### Метрики и результаты
+#### Метрики и результаты
 
 - `GET /api/analysis/:id/metrics` - Получение всех метрик анализа
 - `GET /api/analysis/:id/metrics/:category` - Получение метрик определенной категории
 - `GET /api/analysis/:id/issues` - Получение списка проблем
 - `GET /api/analysis/:id/recommendations` - Получение рекомендаций по улучшению
 
-### Улучшение контента
+#### Улучшение контента
 
 - `GET /api/analysis/:id/content-improvements` - Получение улучшенного контента
 - `POST /api/analysis/:id/content-improvements` - Запрос на генерацию нового улучшенного контента
 - `GET /api/analysis/:id/code-snippets` - Получение сгенерированных фрагментов кода
 - `POST /api/analysis/:id/code-snippets` - Запрос на генерацию новых фрагментов кода
 
-### WebSocket
+#### WebSocket
 
 - `GET /ws/analysis/:id` - WebSocket для получения обновлений о статусе анализа в реальном времени
 
@@ -145,6 +164,7 @@ project/
 - [go-redis](https://github.com/go-redis/redis) - Клиент Redis для Go
 - [jwt-go](https://github.com/golang-jwt/jwt) - Работа с JWT токенами
 - [godotenv](https://github.com/joho/godotenv) - Загрузка переменных окружения из .env файла
+- [Swagger](https://github.com/swaggo/swag) - Генерация Swagger документации
 
 ## Тестирование
 
@@ -165,3 +185,32 @@ go test ./...
 ## Лицензия
 
 Распространяется под лицензией MIT. См. `LICENSE` для получения дополнительной информации.
+
+## Docker
+
+Для запуска с использованием Docker:
+
+```bash
+# Запуск только базы данных и Redis
+docker-compose up -d postgres redis
+
+# Запуск всего приложения в Docker
+docker-compose up -d
+```
+
+## Swagger API Документация
+
+Проект использует Swagger для автоматического документирования API. Это позволяет:
+
+1. Визуально просматривать все доступные эндпоинты
+2. Видеть требуемые параметры для каждого запроса
+3. Тестировать API прямо из браузера
+4. Экспортировать документацию в различные форматы
+
+После запуска приложения, Swagger UI доступен по адресу: http://localhost:8080/swagger
+
+Для обновления документации после внесения изменений в API:
+
+```bash
+bash scripts/generate-swagger.sh
+```
