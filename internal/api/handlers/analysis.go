@@ -105,7 +105,7 @@ func (h *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 	}
 
 	// Parse website
-	websiteData, err := parser.ParseWebsite(url, h.Config.AnalysisTimeout)
+	websiteData, err := parser.ParseWebsite(url, parser.ParseOptions{Timeout: 30 * time.Second})
 	if err != nil {
 		h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
 			"status":       "failed",
