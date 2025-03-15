@@ -61,9 +61,8 @@ func NewConfig() *Config {
 
 		// External APIs
 		OpenAIAPIKey:     getEnv("OPENAI_API_KEY", ""),
-		LighthouseURL:    getEnv("LIGHTHOUSE_API_URL", "https://lighthouse-as-a-service.com/api/v1/audit"),
+		LighthouseURL:    getEnv("LIGHTHOUSE_API_URL", "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"),
 		LighthouseAPIKey: getEnv("LIGHTHOUSE_API_KEY", "default-key"),
-		// LighthouseMobileMode: getEnv("LIGHTHOUSE_MOBILE_MODE", "false"),
 		LighthouseTimeout: func() int {
 			timeout, _ := strconv.Atoi(getEnv("LIGHTHOUSE_TIMEOUT", "60"))
 			return timeout

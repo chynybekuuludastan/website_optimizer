@@ -199,6 +199,7 @@ func (c *Client) RunAudit(ctx context.Context, targetURL string, options AuditOp
 
 	// Добавляем формфактор (стратегию)
 	if options.FormFactor != "" {
+
 		query.Add("strategy", strings.ToLower(string(options.FormFactor)))
 	}
 

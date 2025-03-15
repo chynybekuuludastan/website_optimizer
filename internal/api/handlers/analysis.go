@@ -9,6 +9,7 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 
 	"github.com/chynybekuuludastan/website_optimizer/internal/config"
 	"github.com/chynybekuuludastan/website_optimizer/internal/database"
@@ -301,12 +302,58 @@ func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
 		})
 	}
 
+	// First, check if the analysis exists and get its status
+	var analysis models.Analysis
+	if err := h.DB.Select("id, status, metadata").First(&analysis, analysisID).Error; err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "Анализ не найден",
+		})
+	}
+
+	// If analysis failed, get error from metadata and return it
+	if analysis.Status == "failed" {
+		var metadata map[string]interface{}
+		if err := json.Unmarshal(analysis.Metadata, &metadata); err == nil {
+			if errMsg, ok := metadata["error"].(string); ok {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"success": false,
+					"error":   "Анализ завершился с ошибкой",
+					"details": errMsg,
+					"status":  analysis.Status,
+				})
+			}
+		}
+
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Анализ завершился с ошибкой",
+			"status":  analysis.Status,
+		})
+	}
+
 	// Получаем метрики для категории
 	var metric models.AnalysisMetric
 	if err := h.DB.Where("analysis_id = ? AND category = ?", analysisID, category).First(&metric).Error; err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+		// Instead of 404, return a more informative response
+		if err == gorm.ErrRecordNotFound {
+			return c.JSON(fiber.Map{
+				"success": true,
+				"data": fiber.Map{
+					"category":              category,
+					"status":                analysis.Status,
+					"metrics":               nil,
+					"issues":                []models.Issue{},
+					"recommendations":       []models.Recommendation{},
+					"issues_count":          0,
+					"recommendations_count": 0,
+				},
+			})
+		}
+
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   "Метрики не найдены",
+			"error":   "Не удалось получить метрики: " + err.Error(),
 		})
 	}
 
@@ -322,7 +369,7 @@ func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
 	if err := json.Unmarshal(metric.Value, &result); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   "Не удалось обработать метрики",
+			"error":   "Не удалось обработать метрики: " + err.Error(),
 		})
 	}
 
@@ -335,6 +382,7 @@ func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
 			"score":                 result["score"],
 			"issues_count":          len(issues),
 			"recommendations_count": len(recommendations),
+			"status":                analysis.Status,
 		},
 	})
 }

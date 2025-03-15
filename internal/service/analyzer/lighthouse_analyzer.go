@@ -21,7 +21,7 @@ type LighthouseAnalyzer struct {
 func NewLighthouseAnalyzer(cfg *config.Config) *LighthouseAnalyzer {
 	return &LighthouseAnalyzer{
 		BaseAnalyzer:     NewBaseAnalyzer(),
-		LighthouseClient: lighthouse.NewClient(cfg.LighthouseURL, cfg.LighthouseAPIKey),
+		LighthouseClient: lighthouse.NewClient(cfg.LighthouseURL, "AIzaSyDtb0Y0XFZrWE1GN3GkKKnN00pzHWnK-Dk"),
 		Config:           cfg,
 	}
 }
