@@ -1,3 +1,4 @@
+// internal/api/handlers/analysis.go
 package handlers
 
 import (
@@ -15,23 +16,36 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/config"
 	"github.com/chynybekuuludastan/website_optimizer/internal/database"
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
+	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/analyzer"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
 )
 
 // AnalysisHandler обрабатывает запросы по анализу веб-сайтов
 type AnalysisHandler struct {
-	DB          *database.DatabaseClient
-	RedisClient *database.RedisClient
-	Config      *config.Config
+	AnalysisRepo       repository.AnalysisRepository
+	WebsiteRepo        repository.WebsiteRepository
+	MetricsRepo        repository.MetricsRepository
+	IssueRepo          repository.IssueRepository
+	RecommendationRepo repository.RecommendationRepository
+	RedisClient        *database.RedisClient
+	Config             *config.Config
 }
 
 // NewAnalysisHandler создает новый обработчик анализа
-func NewAnalysisHandler(db *database.DatabaseClient, redisClient *database.RedisClient, cfg *config.Config) *AnalysisHandler {
+func NewAnalysisHandler(
+	repoFactory *repository.Factory,
+	redisClient *database.RedisClient,
+	cfg *config.Config,
+) *AnalysisHandler {
 	return &AnalysisHandler{
-		DB:          db,
-		RedisClient: redisClient,
-		Config:      cfg,
+		AnalysisRepo:       repoFactory.AnalysisRepository,
+		WebsiteRepo:        repoFactory.WebsiteRepository,
+		MetricsRepo:        repoFactory.MetricsRepository,
+		IssueRepo:          repoFactory.IssueRepository,
+		RecommendationRepo: repoFactory.RecommendationRepository,
+		RedisClient:        redisClient,
+		Config:             cfg,
 	}
 }
 
@@ -61,14 +75,13 @@ func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 	}
 
 	// Создаем или получаем веб-сайт
-	var website models.Website
-	result := h.DB.Where("url = ?", req.URL).First(&website)
-	if result.Error != nil {
+	website, err := h.WebsiteRepo.FindByURL(req.URL)
+	if err != nil {
 		// Веб-сайт не найден, создаем новый
-		website = models.Website{
+		website = &models.Website{
 			URL: req.URL,
 		}
-		if err := h.DB.Create(&website).Error; err != nil {
+		if err := h.WebsiteRepo.Create(website); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"success": false,
 				"error":   "Failed to create website record: " + err.Error(),
@@ -84,7 +97,7 @@ func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 		StartedAt: time.Now(),
 	}
 
-	if err := h.DB.Create(&analysis).Error; err != nil {
+	if err := h.AnalysisRepo.Create(&analysis); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   "Failed to create analysis record: " + err.Error(),
@@ -106,7 +119,7 @@ func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 // runAnalysis выполняет фактический анализ веб-сайта
 func (h *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 	// Обновляем статус анализа
-	if err := h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Update("status", "running").Error; err != nil {
+	if err := h.AnalysisRepo.UpdateStatus(analysisID, "running"); err != nil {
 		h.updateAnalysisFailed(analysisID, "Ошибка обновления статуса: "+err.Error())
 		return
 	}
@@ -128,10 +141,12 @@ func (h *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 	}
 
 	// Обновляем информацию о веб-сайте
-	if err := h.DB.Model(&models.Website{}).Where("url = ?", url).Updates(map[string]interface{}{
-		"title":       websiteData.Title,
-		"description": websiteData.Description,
-	}).Error; err != nil {
+	website := &models.Website{
+		ID:          analysisID,
+		Title:       websiteData.Title,
+		Description: websiteData.Description,
+	}
+	if err := h.WebsiteRepo.Update(website); err != nil {
 		h.updateAnalysisFailed(analysisID, "Ошибка обновления информации о сайте: "+err.Error())
 		return
 	}
@@ -147,102 +162,123 @@ func (h *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 		return
 	}
 
-	// Сохраняем метрики в базу данных
-	for analyzerType, result := range results {
-		metricData, err := json.Marshal(result)
-		if err != nil {
-			h.updateAnalysisFailed(analysisID, "Ошибка сериализации результатов: "+err.Error())
-			return
+	// Транзакция для сохранения всех результатов
+	err = h.AnalysisRepo.Transaction(func(tx *gorm.DB) error {
+		// Сохраняем метрики в базу данных
+		var metricsToCreate []models.AnalysisMetric
+		for analyzerType, result := range results {
+			metricData, err := json.Marshal(result)
+			if err != nil {
+				return fmt.Errorf("ошибка сериализации результатов: %w", err)
+			}
+
+			metric := models.AnalysisMetric{
+				AnalysisID: analysisID,
+				Category:   string(analyzerType),
+				Name:       string(analyzerType) + "_score",
+				Value:      datatypes.JSON(metricData),
+			}
+			metricsToCreate = append(metricsToCreate, metric)
 		}
 
-		metric := models.AnalysisMetric{
-			AnalysisID: analysisID,
-			Category:   string(analyzerType),
-			Name:       string(analyzerType) + "_score",
-			Value:      datatypes.JSON(metricData),
-		}
-
-		if err := h.DB.Create(&metric).Error; err != nil {
-			h.updateAnalysisFailed(analysisID, "Ошибка сохранения метрик: "+err.Error())
-			return
-		}
-	}
-
-	// Сохраняем проблемы
-	allIssues := manager.GetAllIssues()
-	for analyzerType, issues := range allIssues {
-		for _, issue := range issues {
-			severity := issue["severity"].(string)
-			description := issue["description"].(string)
-
-			// Создаем запись о проблеме
-			issueRecord := models.Issue{
-				AnalysisID:  analysisID,
-				Category:    string(analyzerType),
-				Severity:    severity,
-				Title:       description,
-				Description: description,
-			}
-
-			// Если есть дополнительные данные, сохраняем их в Location
-			if location, ok := issue["url"].(string); ok {
-				issueRecord.Location = location
-			} else if count, ok := issue["count"].(int); ok {
-				issueRecord.Location = fmt.Sprintf("Count: %d", count)
-			}
-
-			if err := h.DB.Create(&issueRecord).Error; err != nil {
-				h.updateAnalysisFailed(analysisID, "Ошибка сохранения проблемы: "+err.Error())
-				return
+		if len(metricsToCreate) > 0 {
+			metricRepo := repository.NewMetricsRepository(tx)
+			if err := metricRepo.CreateBatch(metricsToCreate); err != nil {
+				return fmt.Errorf("ошибка сохранения метрик: %w", err)
 			}
 		}
-	}
 
-	// Сохраняем рекомендации с удалением дубликатов
-	allRecommendations := manager.GetAllRecommendations()
-	uniqueRecommendations := make(map[string]struct{})
+		// Сохраняем проблемы
+		allIssues := manager.GetAllIssues()
+		var issuesToCreate []models.Issue
 
-	for analyzerType, recommendations := range allRecommendations {
-		for _, rec := range recommendations {
-			// Пропускаем рекомендации, которые уже были добавлены
-			if _, ok := uniqueRecommendations[rec]; ok {
-				continue
-			}
-			uniqueRecommendations[rec] = struct{}{}
+		for analyzerType, issues := range allIssues {
+			for _, issue := range issues {
+				severity := issue["severity"].(string)
+				description := issue["description"].(string)
 
-			priority := "medium" // Значение по умолчанию
+				// Создаем запись о проблеме
+				issueRecord := models.Issue{
+					AnalysisID:  analysisID,
+					Category:    string(analyzerType),
+					Severity:    severity,
+					Title:       description,
+					Description: description,
+				}
 
-			// Определение приоритета на основе типа анализатора
-			switch analyzerType {
-			case analyzer.SEOType, analyzer.SecurityType:
-				priority = "high"
-			case analyzer.PerformanceType, analyzer.AccessibilityType:
-				priority = "medium"
-			case analyzer.StructureType, analyzer.MobileType, analyzer.ContentType:
-				priority = "low"
-			}
+				// Если есть дополнительные данные, сохраняем их в Location
+				if location, ok := issue["url"].(string); ok {
+					issueRecord.Location = location
+				} else if count, ok := issue["count"].(int); ok {
+					issueRecord.Location = fmt.Sprintf("Count: %d", count)
+				}
 
-			// Создаем запись рекомендации
-			recommendation := models.Recommendation{
-				AnalysisID:  analysisID,
-				Category:    string(analyzerType),
-				Priority:    priority,
-				Title:       rec,
-				Description: rec,
-			}
-
-			if err := h.DB.Create(&recommendation).Error; err != nil {
-				h.updateAnalysisFailed(analysisID, "Ошибка сохранения рекомендации: "+err.Error())
-				return
+				issuesToCreate = append(issuesToCreate, issueRecord)
 			}
 		}
+
+		if len(issuesToCreate) > 0 {
+			issueRepo := repository.NewIssueRepository(tx)
+			if err := issueRepo.CreateBatch(issuesToCreate); err != nil {
+				return fmt.Errorf("ошибка сохранения проблемы: %w", err)
+			}
+		}
+
+		// Сохраняем рекомендации с удалением дубликатов
+		allRecommendations := manager.GetAllRecommendations()
+		uniqueRecommendations := make(map[string]struct{})
+		var recommendationsToCreate []models.Recommendation
+
+		for analyzerType, recommendations := range allRecommendations {
+			for _, rec := range recommendations {
+				// Пропускаем рекомендации, которые уже были добавлены
+				if _, ok := uniqueRecommendations[rec]; ok {
+					continue
+				}
+				uniqueRecommendations[rec] = struct{}{}
+
+				priority := "medium" // Значение по умолчанию
+
+				// Определение приоритета на основе типа анализатора
+				switch analyzerType {
+				case analyzer.SEOType, analyzer.SecurityType:
+					priority = "high"
+				case analyzer.PerformanceType, analyzer.AccessibilityType:
+					priority = "medium"
+				case analyzer.StructureType, analyzer.MobileType, analyzer.ContentType:
+					priority = "low"
+				}
+
+				// Создаем запись рекомендации
+				recommendation := models.Recommendation{
+					AnalysisID:  analysisID,
+					Category:    string(analyzerType),
+					Priority:    priority,
+					Title:       rec,
+					Description: rec,
+				}
+
+				recommendationsToCreate = append(recommendationsToCreate, recommendation)
+			}
+		}
+
+		if len(recommendationsToCreate) > 0 {
+			recRepo := repository.NewRecommendationRepository(tx)
+			if err := recRepo.CreateBatch(recommendationsToCreate); err != nil {
+				return fmt.Errorf("ошибка сохранения рекомендации: %w", err)
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		h.updateAnalysisFailed(analysisID, "Ошибка сохранения результатов: "+err.Error())
+		return
 	}
 
 	// Обновляем анализ как завершенный
-	if err := h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
-		"status":       "completed",
-		"completed_at": time.Now(),
-	}).Error; err != nil {
+	if err := h.AnalysisRepo.UpdateStatus(analysisID, "completed"); err != nil {
 		h.updateAnalysisFailed(analysisID, "Ошибка обновления статуса завершения: "+err.Error())
 		return
 	}
@@ -250,10 +286,19 @@ func (h *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 
 // updateAnalysisFailed обновляет статус анализа на "failed"
 func (h *AnalysisHandler) updateAnalysisFailed(analysisID uuid.UUID, errorMsg string) {
-	h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
-		"status":       "failed",
-		"completed_at": time.Now(),
-		"metadata":     datatypes.JSON([]byte(`{"error": "` + errorMsg + `"}`)),
+	// Создаем метаданные с ошибкой
+	metadata := datatypes.JSON([]byte(`{"error": "` + errorMsg + `"}`))
+
+	// Используем транзакцию для обновления
+	h.AnalysisRepo.Transaction(func(tx *gorm.DB) error {
+		// Обновляем статус и сохраняем ошибку в метаданных
+		analysis := &models.Analysis{
+			ID:          analysisID,
+			Status:      "failed",
+			CompletedAt: time.Now(),
+			Metadata:    metadata,
+		}
+		return tx.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(analysis).Error
 	})
 }
 
@@ -279,8 +324,9 @@ func (h *AnalysisHandler) GetOverallScore(c *fiber.Ctx) error {
 		})
 	}
 
-	var metrics []models.AnalysisMetric
-	if err := h.DB.Where("analysis_id = ?", analysisID).Find(&metrics).Error; err != nil {
+	// Получаем все метрики для анализа
+	metrics, err := h.MetricsRepo.FindByAnalysisID(analysisID)
+	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   "Не удалось получить метрики",
@@ -345,7 +391,8 @@ func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
 
 	// First, check if the analysis exists and get its status
 	var analysis models.Analysis
-	if err := h.DB.Select("id, status, metadata").First(&analysis, analysisID).Error; err != nil {
+	err = h.AnalysisRepo.FindByID(analysisID, &analysis)
+	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
 			"error":   "Анализ не найден",
@@ -373,41 +420,39 @@ func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
 		})
 	}
 
-	// Получаем метрики для категории
-	var metric models.AnalysisMetric
-	if err := h.DB.Where("analysis_id = ? AND category = ?", analysisID, category).First(&metric).Error; err != nil {
+	// Get metrics for this category
+	metrics, err := h.MetricsRepo.FindByCategory(analysisID, category)
+	if err != nil || len(metrics) == 0 {
 		// Instead of 404, return a more informative response
-		if err == gorm.ErrRecordNotFound {
-			return c.JSON(fiber.Map{
-				"success": true,
-				"data": fiber.Map{
-					"category":              category,
-					"status":                analysis.Status,
-					"metrics":               nil,
-					"issues":                []models.Issue{},
-					"recommendations":       []models.Recommendation{},
-					"issues_count":          0,
-					"recommendations_count": 0,
-				},
-			})
-		}
-
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Не удалось получить метрики: " + err.Error(),
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data": fiber.Map{
+				"category":              category,
+				"status":                analysis.Status,
+				"metrics":               nil,
+				"issues":                []models.Issue{},
+				"recommendations":       []models.Recommendation{},
+				"issues_count":          0,
+				"recommendations_count": 0,
+			},
 		})
 	}
 
-	// Получаем проблемы и рекомендации
-	var issues []models.Issue
-	h.DB.Where("analysis_id = ? AND category = ?", analysisID, category).Find(&issues)
+	// Get issues for this category
+	issues, err := h.IssueRepo.FindByCategory(analysisID, category)
+	if err != nil {
+		issues = []models.Issue{}
+	}
 
-	var recommendations []models.Recommendation
-	h.DB.Where("analysis_id = ? AND category = ?", analysisID, category).Find(&recommendations)
+	// Get recommendations for this category
+	recommendations, err := h.RecommendationRepo.FindByCategory(analysisID, category)
+	if err != nil {
+		recommendations = []models.Recommendation{}
+	}
 
-	// Парсим результаты метрик
+	// Parse metrics data
 	var result map[string]interface{}
-	if err := json.Unmarshal(metric.Value, &result); err != nil {
+	if err := json.Unmarshal(metrics[0].Value, &result); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   "Не удалось обработать метрики: " + err.Error(),
@@ -453,7 +498,8 @@ func (h *AnalysisHandler) HandleWebSocket(c *websocket.Conn) {
 
 	// Получаем данные анализа
 	var analysis models.Analysis
-	if err := h.DB.Select("id, status, completed_at").First(&analysis, analysisID).Error; err != nil {
+	err = h.AnalysisRepo.FindByID(analysisID, &analysis)
+	if err != nil {
 		c.WriteJSON(fiber.Map{
 			"success": false,
 			"error":   "Анализ не найден",
@@ -485,7 +531,8 @@ func (h *AnalysisHandler) HandleWebSocket(c *websocket.Conn) {
 		select {
 		case <-ticker.C:
 			// Обновляем данные анализа
-			if err := h.DB.Select("id, status, completed_at").First(&analysis, analysisID).Error; err != nil {
+			err = h.AnalysisRepo.FindByID(analysisID, &analysis)
+			if err != nil {
 				c.WriteJSON(fiber.Map{
 					"success": false,
 					"error":   "Ошибка получения анализа",
@@ -511,9 +558,12 @@ func (h *AnalysisHandler) HandleWebSocket(c *websocket.Conn) {
 			if analysis.Status == "completed" || analysis.Status == "failed" {
 				// Получаем общий результат, если анализ завершен
 				if analysis.Status == "completed" {
-					// Вычисляем общий балл
-					var metrics []models.AnalysisMetric
-					h.DB.Where("analysis_id = ?", analysisID).Find(&metrics)
+					// Получаем все метрики
+					metrics, err := h.MetricsRepo.FindByAnalysisID(analysisID)
+					if err != nil {
+						c.Close()
+						return
+					}
 
 					totalScore := 0.0
 					count := 0

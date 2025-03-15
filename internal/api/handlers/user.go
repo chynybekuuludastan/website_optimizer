@@ -1,3 +1,4 @@
+// internal/api/handlers/user.go
 package handlers
 
 import (
@@ -6,21 +7,21 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/chynybekuuludastan/website_optimizer/internal/config"
-	"github.com/chynybekuuludastan/website_optimizer/internal/database"
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
+	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
 )
 
 // UserHandler handles user-related requests
 type UserHandler struct {
-	DB     *database.DatabaseClient
-	Config *config.Config
+	UserRepo repository.UserRepository
+	Config   *config.Config
 }
 
 // NewUserHandler creates a new user handler
-func NewUserHandler(db *database.DatabaseClient, cfg *config.Config) *UserHandler {
+func NewUserHandler(userRepo repository.UserRepository, cfg *config.Config) *UserHandler {
 	return &UserHandler{
-		DB:     db,
-		Config: cfg,
+		UserRepo: userRepo,
+		Config:   cfg,
 	}
 }
 
@@ -48,15 +49,15 @@ type UpdateRoleRequest struct {
 // @Security BearerAuth
 // @Router /users [get]
 func (h *UserHandler) ListUsers(c *fiber.Ctx) error {
-	var users []models.User
-	if err := h.DB.Preload("Role").Find(&users).Error; err != nil {
+	users, count, err := h.UserRepo.FindAll(1, 100) // Default pagination
+	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   "Failed to fetch users",
 		})
 	}
 
-	// Remove sensitive information
+	// Map users to safe response format
 	type SafeUser struct {
 		ID        uuid.UUID `json:"id"`
 		Username  string    `json:"username"`
@@ -79,6 +80,7 @@ func (h *UserHandler) ListUsers(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data":    safeUsers,
+		"total":   count,
 	})
 }
 
@@ -106,7 +108,8 @@ func (h *UserHandler) GetUser(c *fiber.Ctx) error {
 	}
 
 	var user models.User
-	if err := h.DB.Preload("Role").First(&user, userID).Error; err != nil {
+	err = h.UserRepo.FindByID(userID, &user)
+	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
 			"error":   "User not found",
@@ -146,7 +149,7 @@ func (h *UserHandler) UpdateUser(c *fiber.Ctx) error {
 	}
 
 	var user models.User
-	if err := h.DB.First(&user, userID).Error; err != nil {
+	if err := h.UserRepo.FindByID(userID, &user); err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
 			"error":   "User not found",
@@ -154,32 +157,40 @@ func (h *UserHandler) UpdateUser(c *fiber.Ctx) error {
 	}
 
 	// Update user information
-	updates := make(map[string]interface{})
-
 	if req.Username != "" {
 		// Check if username is already taken
-		var count int64
-		h.DB.Model(&models.User{}).Where("username = ? AND id != ?", req.Username, userID).Count(&count)
-		if count > 0 {
+		exists, err := h.UserRepo.ExistsByUsername(req.Username)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"success": false,
+				"error":   "Database error",
+			})
+		}
+		if exists && user.Username != req.Username {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 				"success": false,
 				"error":   "Username already taken",
 			})
 		}
-		updates["username"] = req.Username
+		user.Username = req.Username
 	}
 
 	if req.Email != "" {
 		// Check if email is already registered
-		var count int64
-		h.DB.Model(&models.User{}).Where("email = ? AND id != ?", req.Email, userID).Count(&count)
-		if count > 0 {
+		exists, err := h.UserRepo.ExistsByEmail(req.Email)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"success": false,
+				"error":   "Database error",
+			})
+		}
+		if exists && user.Email != req.Email {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 				"success": false,
 				"error":   "Email already registered",
 			})
 		}
-		updates["email"] = req.Email
+		user.Email = req.Email
 	}
 
 	if req.Password != "" {
@@ -191,16 +202,14 @@ func (h *UserHandler) UpdateUser(c *fiber.Ctx) error {
 				"error":   "Failed to hash password",
 			})
 		}
-		updates["password_hash"] = string(hashedPassword)
+		user.PasswordHash = string(hashedPassword)
 	}
 
-	if len(updates) > 0 {
-		if err := h.DB.Model(&user).Updates(updates).Error; err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"success": false,
-				"error":   "Failed to update user",
-			})
-		}
+	if err := h.UserRepo.Update(&user); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to update user",
+		})
 	}
 
 	return c.JSON(fiber.Map{
@@ -221,14 +230,14 @@ func (h *UserHandler) DeleteUser(c *fiber.Ctx) error {
 	}
 
 	var user models.User
-	if err := h.DB.First(&user, userID).Error; err != nil {
+	if err := h.UserRepo.FindByID(userID, &user); err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
 			"error":   "User not found",
 		})
 	}
 
-	if err := h.DB.Delete(&user).Error; err != nil {
+	if err := h.UserRepo.Delete(&user); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   "Failed to delete user",
@@ -260,24 +269,15 @@ func (h *UserHandler) UpdateRole(c *fiber.Ctx) error {
 		})
 	}
 
-	// Check if role exists
-	var role models.Role
-	if err := h.DB.First(&role, req.RoleID).Error; err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "Role not found",
-		})
-	}
-
 	var user models.User
-	if err := h.DB.First(&user, userID).Error; err != nil {
+	if err := h.UserRepo.FindByID(userID, &user); err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
 			"error":   "User not found",
 		})
 	}
 
-	if err := h.DB.Model(&user).Update("role_id", req.RoleID).Error; err != nil {
+	if err := h.UserRepo.UpdateRole(userID, req.RoleID); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   "Failed to update user role",

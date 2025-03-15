@@ -1,14 +1,15 @@
+// internal/database/postgres.go
 package database
 
 import (
 	"log"
 	"time"
 
+	"github.com/chynybekuuludastan/website_optimizer/internal/database/migration"
+	"github.com/chynybekuuludastan/website_optimizer/internal/database/seed"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
-
-	"github.com/chynybekuuludastan/website_optimizer/internal/models"
 )
 
 // DatabaseClient wraps the GORM DB connection
@@ -18,8 +19,12 @@ type DatabaseClient struct {
 
 // InitPostgreSQL initializes the PostgreSQL connection
 func InitPostgreSQL(dsn string) (*DatabaseClient, error) {
+	// Create database connection
 	gormConfig := &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Info),
+		NowFunc: func() time.Time {
+			return time.Now().UTC()
+		},
 	}
 
 	db, err := gorm.Open(postgres.Open(dsn), gormConfig)
@@ -37,14 +42,27 @@ func InitPostgreSQL(dsn string) (*DatabaseClient, error) {
 	sqlDB.SetMaxOpenConns(100)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
+	// Create client
+	client := &DatabaseClient{DB: db}
+
 	// Run migrations
-	err = runMigrations(db)
-	if err != nil {
-		return nil, err
+	log.Println("Running database migrations...")
+	migrator := migration.NewMigrator(db)
+	if err := migrator.Migrate(); err != nil {
+		log.Printf("Migration warning: %v", err)
 	}
 
-	log.Println("Connected to PostgreSQL database")
-	return &DatabaseClient{DB: db}, nil
+	// Seed default data
+	log.Println("Seeding default data...")
+	if err := seed.SeedDefaultRoles(db); err != nil {
+		log.Printf("Seed warning: %v", err)
+	}
+	if err := seed.SeedDefaultUsers(db); err != nil {
+		log.Printf("Seed warning: %v", err)
+	}
+
+	log.Println("Database setup completed")
+	return client, nil
 }
 
 // Close closes the database connection
@@ -56,37 +74,7 @@ func (d *DatabaseClient) Close() error {
 	return sqlDB.Close()
 }
 
-// runMigrations runs database migrations
-func runMigrations(db *gorm.DB) error {
-	log.Println("Running database migrations...")
-
-	// Auto-migrate models
-	return db.AutoMigrate(
-		&models.Role{},
-		&models.User{},
-		&models.Website{},
-		&models.Analysis{},
-		&models.AnalysisMetric{},
-		&models.Recommendation{},
-		&models.ContentImprovement{},
-		&models.Issue{},
-		&models.UserActivity{},
-	)
-}
-
-// seedDefaultRoles seeds default roles if they don't exist
-func seedDefaultRoles(db *gorm.DB) error {
-	var count int64
-	db.Model(&models.Role{}).Count(&count)
-	if count > 0 {
-		return nil
-	}
-
-	roles := []models.Role{
-		{Name: "admin", Description: "Administrator with full access"},
-		{Name: "analyst", Description: "User who can analyze websites"},
-		{Name: "guest", Description: "Limited access user"},
-	}
-
-	return db.Create(&roles).Error
+// WithTransaction executes a function within a transaction
+func (d *DatabaseClient) WithTransaction(fn func(*gorm.DB) error) error {
+	return d.Transaction(fn)
 }

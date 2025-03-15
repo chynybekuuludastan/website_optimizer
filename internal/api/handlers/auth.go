@@ -1,3 +1,4 @@
+// internal/api/handlers/auth.go
 package handlers
 
 import (
@@ -9,19 +10,21 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/config"
 	"github.com/chynybekuuludastan/website_optimizer/internal/database"
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
+	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
+	"github.com/chynybekuuludastan/website_optimizer/internal/utils/password"
 )
 
 // AuthHandler handles authentication-related requests
 type AuthHandler struct {
-	DB          *database.DatabaseClient
+	UserRepo    repository.UserRepository
 	RedisClient *database.RedisClient
 	Config      *config.Config
 }
 
 // NewAuthHandler creates a new auth handler
-func NewAuthHandler(db *database.DatabaseClient, redisClient *database.RedisClient, cfg *config.Config) *AuthHandler {
+func NewAuthHandler(repo repository.UserRepository, redisClient *database.RedisClient, cfg *config.Config) *AuthHandler {
 	return &AuthHandler{
-		DB:          db,
+		UserRepo:    repo,
 		RedisClient: redisClient,
 		Config:      cfg,
 	}
@@ -68,25 +71,36 @@ func (h *AuthHandler) Register(c *fiber.Ctx) error {
 	}
 
 	// Check if user already exists
-	var count int64
-	h.DB.Model(&models.User{}).Where("email = ?", req.Email).Count(&count)
-	if count > 0 {
+	exists, err := h.UserRepo.ExistsByEmail(req.Email)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Database error",
+		})
+	}
+	if exists {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 			"success": false,
 			"error":   "Email already registered",
 		})
 	}
 
-	h.DB.Model(&models.User{}).Where("username = ?", req.Username).Count(&count)
-	if count > 0 {
+	exists, err = h.UserRepo.ExistsByUsername(req.Username)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Database error",
+		})
+	}
+	if exists {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 			"success": false,
 			"error":   "Username already taken",
 		})
 	}
 
-	// Hash password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	// Hash password using the new secure utility
+	hashedPassword, err := password.Hash(req.Password)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -94,23 +108,20 @@ func (h *AuthHandler) Register(c *fiber.Ctx) error {
 		})
 	}
 
-	// Get analyst role (default for new users)
-	var role models.Role
-	if err := h.DB.Where("name = ?", "analyst").First(&role).Error; err != nil {
-		// If analyst role doesn't exist, create default roles
-		seedDefaultRoles(h.DB)
-		h.DB.Where("name = ?", "analyst").First(&role)
-	}
+	// Get default role (analyst) for new users
+	// For now, assuming role ID 2 is analyst as per the seed data
+	// In a real app, you might want to fetch this dynamically
+	roleID := uint(2) // Analyst role
 
 	// Create user
 	user := models.User{
 		Username:     req.Username,
 		Email:        req.Email,
-		PasswordHash: string(hashedPassword),
-		RoleID:       role.ID,
+		PasswordHash: hashedPassword,
+		RoleID:       roleID,
 	}
 
-	if err := h.DB.Create(&user).Error; err != nil {
+	if err := h.UserRepo.Create(&user); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   "Failed to create user",
@@ -148,24 +159,29 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 	}
 
 	// Find user by email
-	var user models.User
-	if err := h.DB.Preload("Role").Where("email = ?", req.Email).First(&user).Error; err != nil {
+	user, err := h.UserRepo.FindByEmail(req.Email)
+	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"success": false,
 			"error":   "Invalid credentials",
 		})
 	}
 
-	// Check password
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid credentials",
-		})
+	// Check password using our new utility
+	match, err := password.Verify(req.Password, user.PasswordHash)
+	if err != nil || !match {
+		// Fall back to bcrypt for backward compatibility
+		bcryptErr := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password))
+		if bcryptErr != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"success": false,
+				"error":   "Invalid credentials",
+			})
+		}
 	}
 
 	// Generate JWT token
-	token, err := middleware.GenerateJWT(&user, user.Role.Name, h.Config.JWTSecret, h.Config.JWTExpiration)
+	token, err := middleware.GenerateJWT(user, user.Role.Name, h.Config.JWTSecret, h.Config.JWTExpiration)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -187,6 +203,33 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 	})
 }
 
+// GetMe returns information about the current user
+func (h *AuthHandler) GetMe(c *fiber.Ctx) error {
+	// Get user ID from JWT middleware
+	userID := c.Locals("userID").(uuid.UUID)
+
+	// Find user
+	var user models.User
+	err := h.UserRepo.FindByID(userID, &user)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "User not found",
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"id":         user.ID,
+			"username":   user.Username,
+			"email":      user.Email,
+			"role":       user.Role.Name,
+			"created_at": user.CreatedAt,
+		},
+	})
+}
+
 // RefreshToken refreshes a JWT token
 func (h *AuthHandler) RefreshToken(c *fiber.Ctx) error {
 	// Get user ID from JWT middleware
@@ -194,7 +237,8 @@ func (h *AuthHandler) RefreshToken(c *fiber.Ctx) error {
 
 	// Find user
 	var user models.User
-	if err := h.DB.Preload("Role").First(&user, userID).Error; err != nil {
+	err := h.UserRepo.FindByID(userID, &user)
+	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"success": false,
 			"error":   "Invalid user",
@@ -254,47 +298,4 @@ func (h *AuthHandler) Logout(c *fiber.Ctx) error {
 		"success": true,
 		"message": "Logged out successfully",
 	})
-}
-
-// GetMe returns information about the current user
-func (h *AuthHandler) GetMe(c *fiber.Ctx) error {
-	// Get user ID from JWT middleware
-	userID := c.Locals("userID").(uuid.UUID)
-
-	// Find user
-	var user models.User
-	if err := h.DB.Preload("Role").First(&user, userID).Error; err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "User not found",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data": fiber.Map{
-			"id":         user.ID,
-			"username":   user.Username,
-			"email":      user.Email,
-			"role":       user.Role.Name,
-			"created_at": user.CreatedAt,
-		},
-	})
-}
-
-// seedDefaultRoles seeds default roles if they don't exist
-func seedDefaultRoles(db *database.DatabaseClient) error {
-	var count int64
-	db.Model(&models.Role{}).Count(&count)
-	if count > 0 {
-		return nil
-	}
-
-	roles := []models.Role{
-		{Name: "admin", Description: "Administrator with full access"},
-		{Name: "analyst", Description: "User who can analyze websites"},
-		{Name: "guest", Description: "Limited access user"},
-	}
-
-	return db.Create(&roles).Error
 }

@@ -1,27 +1,37 @@
+// internal/api/handlers/website.go
 package handlers
 
 import (
+	"math"
+	"strconv"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 
 	"github.com/chynybekuuludastan/website_optimizer/internal/config"
 	"github.com/chynybekuuludastan/website_optimizer/internal/database"
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
+	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
 )
 
 // WebsiteHandler handles website-related requests
 type WebsiteHandler struct {
-	DB          *database.DatabaseClient
-	RedisClient *database.RedisClient
-	Config      *config.Config
+	WebsiteRepo  repository.WebsiteRepository
+	AnalysisRepo repository.AnalysisRepository
+	RedisClient  *database.RedisClient
+	Config       *config.Config
 }
 
 // NewWebsiteHandler creates a new website handler
-func NewWebsiteHandler(db *database.DatabaseClient, redisClient *database.RedisClient, cfg *config.Config) *WebsiteHandler {
+func NewWebsiteHandler(websiteRepo repository.WebsiteRepository,
+	analysisRepo repository.AnalysisRepository,
+	redisClient *database.RedisClient,
+	cfg *config.Config) *WebsiteHandler {
 	return &WebsiteHandler{
-		DB:          db,
-		RedisClient: redisClient,
-		Config:      cfg,
+		WebsiteRepo:  websiteRepo,
+		AnalysisRepo: analysisRepo,
+		RedisClient:  redisClient,
+		Config:       cfg,
 	}
 }
 
@@ -54,10 +64,24 @@ func (h *WebsiteHandler) CreateWebsite(c *fiber.Ctx) error {
 	}
 
 	// Check if website already exists
-	var website models.Website
-	result := h.DB.Where("url = ?", req.URL).First(&website)
-	if result.Error == nil {
+	exists, err := h.WebsiteRepo.ExistsByURL(req.URL)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Database error: " + err.Error(),
+		})
+	}
+
+	if exists {
 		// Return existing website
+		website, err := h.WebsiteRepo.FindByURL(req.URL)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"success": false,
+				"error":   "Failed to fetch website: " + err.Error(),
+			})
+		}
+
 		return c.JSON(fiber.Map{
 			"success": true,
 			"data":    website,
@@ -65,13 +89,13 @@ func (h *WebsiteHandler) CreateWebsite(c *fiber.Ctx) error {
 	}
 
 	// Create new website
-	website = models.Website{
+	website := models.Website{
 		URL:         req.URL,
 		Title:       req.Title,
 		Description: req.Description,
 	}
 
-	if err := h.DB.Create(&website).Error; err != nil {
+	if err := h.WebsiteRepo.Create(&website); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   "Failed to create website: " + err.Error(),
@@ -95,8 +119,38 @@ func (h *WebsiteHandler) CreateWebsite(c *fiber.Ctx) error {
 // @Security BearerAuth
 // @Router /websites [get]
 func (h *WebsiteHandler) ListWebsites(c *fiber.Ctx) error {
-	var websites []models.Website
-	if err := h.DB.Find(&websites).Error; err != nil {
+	// Get page and page size from query parameters or use defaults
+	page := 1
+	pageSize := 10
+
+	if c.Query("page") != "" {
+		if pageInt, err := strconv.Atoi(c.Query("page")); err == nil && pageInt > 0 {
+			page = pageInt
+		}
+	}
+
+	if c.Query("per_page") != "" {
+		if sizeInt, err := strconv.Atoi(c.Query("per_page")); err == nil && sizeInt > 0 {
+			pageSize = sizeInt
+		}
+	}
+
+	// Check if we have a search query
+	searchQuery := c.Query("search")
+
+	var websites []*models.Website
+	var total int64
+	var err error
+
+	if searchQuery != "" {
+		// Search websites
+		websites, total, err = h.WebsiteRepo.Search(searchQuery, page, pageSize)
+	} else {
+		// Get all websites with pagination
+		websites, total, err = h.WebsiteRepo.FindAll(page, pageSize)
+	}
+
+	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   "Failed to fetch websites: " + err.Error(),
@@ -106,6 +160,12 @@ func (h *WebsiteHandler) ListWebsites(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data":    websites,
+		"meta": fiber.Map{
+			"total":       total,
+			"page":        page,
+			"per_page":    pageSize,
+			"total_pages": int(math.Ceil(float64(total) / float64(pageSize))),
+		},
 	})
 }
 
@@ -120,17 +180,14 @@ func (h *WebsiteHandler) GetWebsite(c *fiber.Ctx) error {
 		})
 	}
 
-	var website models.Website
-	if err := h.DB.First(&website, websiteID).Error; err != nil {
+	// Get website with its analyses
+	website, analyses, err := h.WebsiteRepo.FindWithAnalyses(websiteID)
+	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
 			"error":   "Website not found",
 		})
 	}
-
-	// Get analyses count for this website
-	var analysesCount int64
-	h.DB.Model(&models.Analysis{}).Where("website_id = ?", websiteID).Count(&analysesCount)
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -141,7 +198,8 @@ func (h *WebsiteHandler) GetWebsite(c *fiber.Ctx) error {
 			"description":    website.Description,
 			"created_at":     website.CreatedAt,
 			"updated_at":     website.UpdatedAt,
-			"analyses_count": analysesCount,
+			"analyses_count": len(analyses),
+			"analyses":       analyses,
 		},
 	})
 }
@@ -158,7 +216,8 @@ func (h *WebsiteHandler) DeleteWebsite(c *fiber.Ctx) error {
 	}
 
 	var website models.Website
-	if err := h.DB.First(&website, websiteID).Error; err != nil {
+	err = h.WebsiteRepo.FindByID(websiteID, &website)
+	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
 			"error":   "Website not found",
@@ -166,8 +225,14 @@ func (h *WebsiteHandler) DeleteWebsite(c *fiber.Ctx) error {
 	}
 
 	// Check if any analyses reference this website
-	var count int64
-	h.DB.Model(&models.Analysis{}).Where("website_id = ?", websiteID).Count(&count)
+	_, count, err := h.AnalysisRepo.FindByWebsiteID(websiteID, 1, 1)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to check references: " + err.Error(),
+		})
+	}
+
 	if count > 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,
@@ -175,7 +240,7 @@ func (h *WebsiteHandler) DeleteWebsite(c *fiber.Ctx) error {
 		})
 	}
 
-	if err := h.DB.Delete(&website).Error; err != nil {
+	if err := h.WebsiteRepo.Delete(&website); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   "Failed to delete website: " + err.Error(),

@@ -8,15 +8,24 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/api/middleware"
 	"github.com/chynybekuuludastan/website_optimizer/internal/config"
 	"github.com/chynybekuuludastan/website_optimizer/internal/database"
+	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
 )
 
 // SetupRoutes configures all API routes
 func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *database.RedisClient, cfg *config.Config) {
+	// Initialize repository factory
+	repoFactory := repository.NewRepositoryFactory(db.DB)
+
 	// Initialize handlers
-	authHandler := handlers.NewAuthHandler(db, redisClient, cfg)
-	userHandler := handlers.NewUserHandler(db, cfg)
-	websiteHandler := handlers.NewWebsiteHandler(db, redisClient, cfg)
-	analysisHandler := handlers.NewAnalysisHandler(db, redisClient, cfg)
+	authHandler := handlers.NewAuthHandler(repoFactory.UserRepository, redisClient, cfg)
+	userHandler := handlers.NewUserHandler(repoFactory.UserRepository, cfg)
+	websiteHandler := handlers.NewWebsiteHandler(
+		repoFactory.WebsiteRepository,
+		repoFactory.AnalysisRepository,
+		redisClient,
+		cfg,
+	)
+	analysisHandler := handlers.NewAnalysisHandler(repoFactory, redisClient, cfg)
 
 	// API group
 	api := app.Group("/api")
@@ -32,7 +41,7 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 	auth := api.Group("/auth")
 	auth.Post("/register", authHandler.Register)
 	auth.Post("/login", authHandler.Login)
-	auth.Post("/refresh", authHandler.RefreshToken)
+	auth.Post("/refresh", middleware.JWTMiddleware(cfg), authHandler.RefreshToken)
 	auth.Post("/logout", middleware.JWTMiddleware(cfg), authHandler.Logout)
 	auth.Get("/me", middleware.JWTMiddleware(cfg), authHandler.GetMe)
 
