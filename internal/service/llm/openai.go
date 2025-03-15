@@ -2,6 +2,7 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,32 +12,34 @@ import (
 )
 
 const (
-	OpenAIAPIURL = "https://api.openai.com/v1/chat/completions"
+	openAICompletionsURL = "https://api.openai.com/v1/chat/completions"
+	defaultTimeout       = 30 * time.Second
 )
 
-// OpenAIClient represents an OpenAI API client
-type OpenAIClient struct {
-	APIKey  string
-	Timeout time.Duration
-	Model   string
+// OpenAIProvider implements the Provider interface for OpenAI
+type OpenAIProvider struct {
+	apiKey     string
+	model      string
+	httpClient *http.Client
+	logger     Logger
 }
 
-// Message represents a single message in a conversation
-type Message struct {
+// OpenAIMessage represents a message in the OpenAI chat API
+type OpenAIMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// ChatCompletionRequest represents the request to OpenAI's chat completion API
-type ChatCompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
+// OpenAIRequest represents a request to OpenAI's chat completions API
+type OpenAIRequest struct {
+	Model       string          `json:"model"`
+	Messages    []OpenAIMessage `json:"messages"`
+	Temperature float64         `json:"temperature"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
 }
 
-// ChatCompletionResponse represents the response from OpenAI's chat completion API
-type ChatCompletionResponse struct {
+// OpenAIResponse represents the response from OpenAI's chat completions API
+type OpenAIResponse struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
 	Created int    `json:"created"`
@@ -55,23 +58,165 @@ type ChatCompletionResponse struct {
 	} `json:"usage"`
 }
 
-// NewOpenAIClient creates a new OpenAI client
-func NewOpenAIClient(apiKey string) *OpenAIClient {
-	return &OpenAIClient{
-		APIKey:  apiKey,
-		Timeout: 30 * time.Second,
-		Model:   "gpt-4",
+// NewOpenAIProvider creates a new OpenAI provider
+func NewOpenAIProvider(apiKey string, model string, logger Logger) *OpenAIProvider {
+	if model == "" {
+		model = "gpt-4" // Default model
+	}
+
+	if logger == nil {
+		logger = &DefaultLogger{}
+	}
+
+	return &OpenAIProvider{
+		apiKey:     apiKey,
+		model:      model,
+		httpClient: &http.Client{Timeout: defaultTimeout},
+		logger:     logger,
 	}
 }
 
-// GenerateContentImprovements generates improved content using OpenAI
-func (c *OpenAIClient) GenerateContentImprovements(
-	url string,
-	title string,
-	ctaButton string,
-	content string,
-) (map[string]string, error) {
-	prompt := fmt.Sprintf(`
+// GetName returns the provider name
+func (p *OpenAIProvider) GetName() string {
+	return "openai"
+}
+
+// GenerateContent implements the Provider interface
+func (p *OpenAIProvider) GenerateContent(ctx context.Context, request *ContentRequest) (*ContentResponse, error) {
+	prompt := p.buildContentPrompt(request)
+
+	messages := []OpenAIMessage{
+		{
+			Role:    "system",
+			Content: "You are an expert in web content optimization to improve conversions and user experience.",
+		},
+		{
+			Role:    "user",
+			Content: prompt,
+		},
+	}
+
+	apiRequest := OpenAIRequest{
+		Model:       p.model,
+		Messages:    messages,
+		Temperature: 0.7,
+	}
+
+	apiResponse, err := p.makeRequest(ctx, apiRequest)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(apiResponse.Choices) == 0 {
+		return nil, errors.New("empty response from OpenAI")
+	}
+
+	responseContent := apiResponse.Choices[0].Message.Content
+
+	// Parse the JSON response
+	var improvements map[string]string
+	if err := json.Unmarshal([]byte(responseContent), &improvements); err != nil {
+		p.logger.Error("Failed to parse OpenAI response as JSON",
+			"error", err,
+			"content", responseContent)
+
+		// Try to extract content using regex as fallback
+		parsed, extractErr := extractContentFromText(responseContent)
+		if extractErr != nil {
+			return nil, fmt.Errorf("failed to parse response: %w", err)
+		}
+		improvements = parsed
+	}
+
+	return &ContentResponse{
+		Title:   improvements["heading"],
+		CTAText: improvements["cta_button"],
+		Content: improvements["improved_content"],
+	}, nil
+}
+
+// GenerateHTML implements the Provider interface
+func (p *OpenAIProvider) GenerateHTML(ctx context.Context, originalContent string, improved *ContentResponse) (string, error) {
+	prompt := p.buildHTMLPrompt(originalContent, improved)
+
+	messages := []OpenAIMessage{
+		{
+			Role:    "system",
+			Content: "You are an expert HTML developer. Generate clean, semantic HTML code.",
+		},
+		{
+			Role:    "user",
+			Content: prompt,
+		},
+	}
+
+	apiRequest := OpenAIRequest{
+		Model:       p.model,
+		Messages:    messages,
+		Temperature: 0.3, // Lower temperature for more deterministic output
+	}
+
+	apiResponse, err := p.makeRequest(ctx, apiRequest)
+	if err != nil {
+		return "", err
+	}
+
+	if len(apiResponse.Choices) == 0 {
+		return "", errors.New("empty response from OpenAI")
+	}
+
+	html := apiResponse.Choices[0].Message.Content
+
+	// Remove markdown code blocks if present
+	html = cleanCodeBlocks(html)
+
+	return html, nil
+}
+
+// makeRequest sends a request to the OpenAI API
+func (p *OpenAIProvider) makeRequest(ctx context.Context, request OpenAIRequest) (*OpenAIResponse, error) {
+	requestBody, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", openAICompletionsURL, bytes.NewBuffer(requestBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+
+	resp, err := p.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		p.logger.Error("OpenAI API error",
+			"status", resp.Status,
+			"body", string(body))
+		return nil, fmt.Errorf("API error: %s", resp.Status)
+	}
+
+	var apiResponse OpenAIResponse
+	if err := json.Unmarshal(body, &apiResponse); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	return &apiResponse, nil
+}
+
+// buildContentPrompt creates a prompt for content improvement
+func (p *OpenAIProvider) buildContentPrompt(request *ContentRequest) string {
+	return fmt.Sprintf(`
 На основе анализа сайта %s, предложите улучшенные версии заголовков, CTA-кнопок и текстового
 контента для повышения конверсии. Учитывайте текущий контент:
 - заголовок: "%s"
@@ -79,123 +224,26 @@ func (c *OpenAIClient) GenerateContentImprovements(
 - текст: "%s"
 
 Формат ответа: JSON с полями 'heading', 'cta_button', 'improved_content'.
-`, url, title, ctaButton, content)
-
-	messages := []Message{
-		{Role: "system", Content: "Вы - эксперт по оптимизации веб-контента для улучшения конверсии"},
-		{Role: "user", Content: prompt},
-	}
-
-	req := ChatCompletionRequest{
-		Model:       c.Model,
-		Messages:    messages,
-		Temperature: 0.7,
-	}
-
-	reqBody, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq, err := http.NewRequest("POST", OpenAIAPIURL, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-
-	client := &http.Client{Timeout: c.Timeout}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("OpenAI API error: %s - %s", resp.Status, string(body))
-	}
-
-	var result ChatCompletionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	if len(result.Choices) == 0 {
-		return nil, errors.New("no content was generated")
-	}
-
-	// Parse the content as JSON
-	var improvements map[string]string
-	if err := json.Unmarshal([]byte(result.Choices[0].Message.Content), &improvements); err != nil {
-		// If parsing as JSON fails, return the content as is
-		return map[string]string{
-			"raw_content": result.Choices[0].Message.Content,
-		}, nil
-	}
-
-	return improvements, nil
+`, request.URL, request.Title, request.CTAText, request.Content)
 }
 
-// GenerateCodeSnippet generates HTML code snippet for the improved content
-func (c *OpenAIClient) GenerateCodeSnippet(originalHTML, improvementJSON string) (string, error) {
-	prompt := fmt.Sprintf(`
-На основе оригинального HTML и предложенных улучшений, создайте обновленный HTML-код.
+// buildHTMLPrompt creates a prompt for HTML generation
+func (p *OpenAIProvider) buildHTMLPrompt(originalContent string, improved *ContentResponse) string {
+	improvementsJSON, _ := json.Marshal(map[string]string{
+		"heading":          improved.Title,
+		"cta_button":       improved.CTAText,
+		"improved_content": improved.Content,
+	})
 
-Оригинальный HTML:
+	return fmt.Sprintf(`
+На основе оригинального контента и предложенных улучшений, создайте обновленный HTML-код.
+
+Оригинальный контент:
 %s
 
 Предложенные улучшения (JSON):
 %s
 
 Верните только HTML-код без объяснений.
-`, originalHTML, improvementJSON)
-
-	messages := []Message{
-		{Role: "system", Content: "Вы - эксперт по HTML, CSS и веб-разработке"},
-		{Role: "user", Content: prompt},
-	}
-
-	req := ChatCompletionRequest{
-		Model:       c.Model,
-		Messages:    messages,
-		Temperature: 0.3,
-	}
-
-	reqBody, err := json.Marshal(req)
-	if err != nil {
-		return "", err
-	}
-
-	httpReq, err := http.NewRequest("POST", OpenAIAPIURL, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return "", err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-
-	client := &http.Client{Timeout: c.Timeout}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("OpenAI API error: %s - %s", resp.Status, string(body))
-	}
-
-	var result ChatCompletionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-
-	if len(result.Choices) == 0 {
-		return "", errors.New("no content was generated")
-	}
-
-	return result.Choices[0].Message.Content, nil
+`, originalContent, string(improvementsJSON))
 }
