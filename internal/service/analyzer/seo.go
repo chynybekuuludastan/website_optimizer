@@ -6,232 +6,280 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
 )
 
-// SEOResult contains the SEO analysis results
-type SEOResult struct {
-	Score            float64                  `json:"score"`
-	MissingMetaTitle bool                     `json:"missing_meta_title"`
-	MetaTitleLength  int                      `json:"meta_title_length"`
-	MissingMetaDesc  bool                     `json:"missing_meta_description"`
-	MetaDescLength   int                      `json:"meta_description_length"`
-	HeadingStructure map[string]int           `json:"heading_structure"`
-	MissingAltTags   []string                 `json:"missing_alt_tags"`
-	KeywordDensity   map[string]float64       `json:"keyword_density"`
-	InternalLinks    int                      `json:"internal_links"`
-	ExternalLinks    int                      `json:"external_links"`
-	BrokenLinks      []string                 `json:"broken_links"`
-	CanonicalURL     string                   `json:"canonical_url"`
-	MobileFriendly   bool                     `json:"mobile_friendly"`
-	Issues           []map[string]interface{} `json:"issues"`
-	Recommendations  []string                 `json:"recommendations"`
+// SEOAnalyzer анализирует SEO-аспекты веб-сайта
+type SEOAnalyzer struct {
+	*BaseAnalyzer
 }
 
-// AnalyzeSEO performs SEO analysis on the website data
-func AnalyzeSEO(data *parser.WebsiteData) map[string]interface{} {
-	result := SEOResult{
-		HeadingStructure: make(map[string]int),
-		KeywordDensity:   make(map[string]float64),
-		MissingAltTags:   []string{},
-		BrokenLinks:      []string{},
-		Issues:           []map[string]interface{}{},
-		Recommendations:  []string{},
+// NewSEOAnalyzer создает новый SEO-анализатор
+func NewSEOAnalyzer() *SEOAnalyzer {
+	return &SEOAnalyzer{
+		BaseAnalyzer: NewBaseAnalyzer(),
 	}
+}
 
-	// Check meta title
-	result.MissingMetaTitle = data.Title == ""
-	result.MetaTitleLength = len(data.Title)
-	if result.MissingMetaTitle {
-		result.Issues = append(result.Issues, map[string]interface{}{
+// Analyze выполняет SEO-анализ данных веб-сайта
+func (a *SEOAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interface{}, error) {
+	// Проверка мета-тегов title и description
+	a.analyzeTitleAndDescription(data)
+
+	// Анализ структуры заголовков
+	a.analyzeHeadings(data)
+
+	// Проверка альтернативных текстов для изображений
+	a.analyzeImages(data)
+
+	// Анализ ссылок
+	a.analyzeLinks(data)
+
+	// Проверка canonical URL
+	a.analyzeCanonical(data)
+
+	// Анализ плотности ключевых слов
+	a.analyzeKeywords(data)
+
+	// Расчет общей оценки
+	score := a.CalculateScore()
+	a.SetMetric("score", score)
+
+	return a.GetMetrics(), nil
+}
+
+// analyzeTitleAndDescription проверяет мета-теги title и description
+func (a *SEOAnalyzer) analyzeTitleAndDescription(data *parser.WebsiteData) {
+	// Проверка мета-тега title
+	missingMetaTitle := data.Title == ""
+	metaTitleLength := len(data.Title)
+
+	a.SetMetric("missing_meta_title", missingMetaTitle)
+	a.SetMetric("meta_title_length", metaTitleLength)
+
+	if missingMetaTitle {
+		a.AddIssue(map[string]interface{}{
 			"type":        "missing_title",
 			"severity":    "high",
-			"description": "The page is missing a title tag",
+			"description": "На странице отсутствует тег title",
 		})
-		result.Recommendations = append(result.Recommendations, "Add a descriptive title tag to the page")
-	} else if result.MetaTitleLength < 30 || result.MetaTitleLength > 60 {
-		result.Issues = append(result.Issues, map[string]interface{}{
+		a.AddRecommendation("Добавьте информативный title-тег на страницу")
+	} else if metaTitleLength < 30 || metaTitleLength > 60 {
+		a.AddIssue(map[string]interface{}{
 			"type":        "title_length",
 			"severity":    "medium",
-			"description": "The title tag is either too short or too long",
-			"current":     result.MetaTitleLength,
-			"recommended": "30-60 characters",
+			"description": "Тег title либо слишком короткий, либо слишком длинный",
+			"current":     metaTitleLength,
+			"recommended": "30-60 символов",
 		})
-		if result.MetaTitleLength < 30 {
-			result.Recommendations = append(result.Recommendations, "Make the title tag more descriptive (at least 30 characters)")
+		if metaTitleLength < 30 {
+			a.AddRecommendation("Сделайте title-тег более информативным (минимум 30 символов)")
 		} else {
-			result.Recommendations = append(result.Recommendations, "Shorten the title tag (maximum 60 characters recommended)")
+			a.AddRecommendation("Сократите title-тег (рекомендуется максимум 60 символов)")
 		}
 	}
 
-	// Check meta description
+	// Проверка мета-тега description
 	metaDesc := ""
 	if desc, ok := data.MetaTags["description"]; ok {
 		metaDesc = desc
 	}
-	result.MissingMetaDesc = metaDesc == ""
-	result.MetaDescLength = len(metaDesc)
-	if result.MissingMetaDesc {
-		result.Issues = append(result.Issues, map[string]interface{}{
+	missingMetaDesc := metaDesc == ""
+	metaDescLength := len(metaDesc)
+
+	a.SetMetric("missing_meta_description", missingMetaDesc)
+	a.SetMetric("meta_description_length", metaDescLength)
+
+	if missingMetaDesc {
+		a.AddIssue(map[string]interface{}{
 			"type":        "missing_description",
 			"severity":    "high",
-			"description": "The page is missing a meta description",
+			"description": "На странице отсутствует мета-тег description",
 		})
-		result.Recommendations = append(result.Recommendations, "Add a meta description tag with a concise summary of the page content")
-	} else if result.MetaDescLength < 50 || result.MetaDescLength > 160 {
-		result.Issues = append(result.Issues, map[string]interface{}{
+		a.AddRecommendation("Добавьте мета-тег description с кратким описанием содержания страницы")
+	} else if metaDescLength < 50 || metaDescLength > 160 {
+		a.AddIssue(map[string]interface{}{
 			"type":        "description_length",
 			"severity":    "medium",
-			"description": "The meta description is either too short or too long",
-			"current":     result.MetaDescLength,
-			"recommended": "50-160 characters",
+			"description": "Мета-тег description либо слишком короткий, либо слишком длинный",
+			"current":     metaDescLength,
+			"recommended": "50-160 символов",
 		})
-		if result.MetaDescLength < 50 {
-			result.Recommendations = append(result.Recommendations, "Make the meta description more descriptive (at least 50 characters)")
+		if metaDescLength < 50 {
+			a.AddRecommendation("Сделайте мета-тег description более информативным (минимум 50 символов)")
 		} else {
-			result.Recommendations = append(result.Recommendations, "Shorten the meta description (maximum 160 characters recommended)")
+			a.AddRecommendation("Сократите мета-тег description (рекомендуется максимум 160 символов)")
 		}
-	}
-
-	// Analyze heading structure
-	result.HeadingStructure["h1"] = len(data.H1)
-	result.HeadingStructure["h2"] = len(data.H2)
-	result.HeadingStructure["h3"] = len(data.H3)
-
-	if len(data.H1) == 0 {
-		result.Issues = append(result.Issues, map[string]interface{}{
-			"type":        "missing_h1",
-			"severity":    "high",
-			"description": "The page is missing an H1 heading",
-		})
-		result.Recommendations = append(result.Recommendations, "Add an H1 heading that clearly describes the page content")
-	} else if len(data.H1) > 1 {
-		result.Issues = append(result.Issues, map[string]interface{}{
-			"type":        "multiple_h1",
-			"severity":    "medium",
-			"description": "The page has multiple H1 headings",
-			"count":       len(data.H1),
-		})
-		result.Recommendations = append(result.Recommendations, "Use only one H1 heading per page")
-	}
-
-	// Check image alt tags
-	for _, img := range data.Images {
-		if img.Alt == "" {
-			result.MissingAltTags = append(result.MissingAltTags, img.URL)
-			result.Issues = append(result.Issues, map[string]interface{}{
-				"type":        "missing_alt",
-				"severity":    "medium",
-				"description": "An image is missing an alt attribute",
-				"url":         img.URL,
-			})
-		}
-	}
-	if len(result.MissingAltTags) > 0 {
-		result.Recommendations = append(result.Recommendations, "Add descriptive alt text to all images")
-	}
-
-	// Analyze links
-	for _, link := range data.Links {
-		if link.IsInternal {
-			result.InternalLinks++
-		} else {
-			result.ExternalLinks++
-		}
-
-		if link.StatusCode >= 400 {
-			result.BrokenLinks = append(result.BrokenLinks, link.URL)
-			result.Issues = append(result.Issues, map[string]interface{}{
-				"type":        "broken_link",
-				"severity":    "high",
-				"description": "A link on the page is broken",
-				"url":         link.URL,
-				"status_code": link.StatusCode,
-			})
-		}
-	}
-	if len(result.BrokenLinks) > 0 {
-		result.Recommendations = append(result.Recommendations, "Fix broken links on the page")
-	}
-
-	// Look for canonical URL
-	for key, value := range data.MetaTags {
-		if key == "canonical" {
-			result.CanonicalURL = value
-			break
-		}
-	}
-	if result.CanonicalURL == "" {
-		result.Issues = append(result.Issues, map[string]interface{}{
-			"type":        "missing_canonical",
-			"severity":    "low",
-			"description": "The page is missing a canonical URL",
-		})
-		result.Recommendations = append(result.Recommendations, "Add a canonical URL to prevent duplicate content issues")
-	}
-
-	// Simple keyword density analysis
-	if data.TextContent != "" {
-		words := strings.Fields(strings.ToLower(data.TextContent))
-		wordCount := make(map[string]int)
-		totalWords := len(words)
-
-		for _, word := range words {
-			// Skip short words and common stop words
-			if len(word) <= 2 || isStopWord(word) {
-				continue
-			}
-			// Remove punctuation
-			word = strings.Trim(word, ".,?!:;()")
-			if word != "" {
-				wordCount[word]++
-			}
-		}
-
-		// Calculate keyword density
-		for word, count := range wordCount {
-			if count >= 3 { // Only include words that appear at least 3 times
-				result.KeywordDensity[word] = float64(count) / float64(totalWords) * 100
-			}
-		}
-	}
-
-	// Calculate overall score based on issues
-	// Simple scoring: start with 100 and subtract points for issues
-	score := 100.0
-	for _, issue := range result.Issues {
-		severity := issue["severity"].(string)
-		switch severity {
-		case "high":
-			score -= 15
-		case "medium":
-			score -= 10
-		case "low":
-			score -= 5
-		}
-	}
-	// Ensure score is between 0 and 100
-	if score < 0 {
-		score = 0
-	}
-	result.Score = score
-
-	return map[string]interface{}{
-		"score":                    result.Score,
-		"missing_meta_title":       result.MissingMetaTitle,
-		"meta_title_length":        result.MetaTitleLength,
-		"missing_meta_description": result.MissingMetaDesc,
-		"meta_description_length":  result.MetaDescLength,
-		"heading_structure":        result.HeadingStructure,
-		"missing_alt_tags":         result.MissingAltTags,
-		"keyword_density":          result.KeywordDensity,
-		"internal_links":           result.InternalLinks,
-		"external_links":           result.ExternalLinks,
-		"broken_links":             result.BrokenLinks,
-		"canonical_url":            result.CanonicalURL,
-		"issues":                   result.Issues,
-		"recommendations":          result.Recommendations,
 	}
 }
 
-// isStopWord checks if a word is a common stop word
+// analyzeHeadings анализирует структуру заголовков
+func (a *SEOAnalyzer) analyzeHeadings(data *parser.WebsiteData) {
+	headingStructure := map[string]int{
+		"h1": len(data.H1),
+		"h2": len(data.H2),
+		"h3": len(data.H3),
+	}
+	a.SetMetric("heading_structure", headingStructure)
+
+	if len(data.H1) == 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "missing_h1",
+			"severity":    "high",
+			"description": "На странице отсутствует заголовок H1",
+		})
+		a.AddRecommendation("Добавьте заголовок H1, который четко описывает содержание страницы")
+	} else if len(data.H1) > 1 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "multiple_h1",
+			"severity":    "medium",
+			"description": "На странице несколько заголовков H1",
+			"count":       len(data.H1),
+		})
+		a.AddRecommendation("Используйте только один заголовок H1 на странице")
+	}
+
+	if len(data.H2) == 0 && len(data.TextContent) > 300 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "missing_h2",
+			"severity":    "medium",
+			"description": "На странице отсутствуют заголовки H2",
+		})
+		a.AddRecommendation("Используйте заголовки H2 для структурирования контента")
+	}
+}
+
+// analyzeImages проверяет альтернативные тексты для изображений
+func (a *SEOAnalyzer) analyzeImages(data *parser.WebsiteData) {
+	missingAltTags := []string{}
+	for _, img := range data.Images {
+		if img.Alt == "" {
+			missingAltTags = append(missingAltTags, img.URL)
+		}
+	}
+	a.SetMetric("missing_alt_tags", missingAltTags)
+
+	if len(missingAltTags) > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "missing_alt",
+			"severity":    "medium",
+			"description": "Изображения без атрибута alt",
+			"count":       len(missingAltTags),
+		})
+		a.AddRecommendation("Добавьте информативный alt-текст ко всем изображениям")
+	}
+}
+
+// analyzeLinks анализирует внутренние и внешние ссылки
+func (a *SEOAnalyzer) analyzeLinks(data *parser.WebsiteData) {
+	internalLinks := 0
+	externalLinks := 0
+	brokenLinks := []string{}
+
+	for _, link := range data.Links {
+		if link.IsInternal {
+			internalLinks++
+		} else {
+			externalLinks++
+		}
+
+		if link.StatusCode >= 400 {
+			brokenLinks = append(brokenLinks, link.URL)
+		}
+	}
+
+	a.SetMetric("internal_links", internalLinks)
+	a.SetMetric("external_links", externalLinks)
+	a.SetMetric("broken_links", brokenLinks)
+
+	if len(brokenLinks) > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "broken_links",
+			"severity":    "high",
+			"description": "На странице есть неработающие ссылки",
+			"count":       len(brokenLinks),
+		})
+		a.AddRecommendation("Исправьте или удалите неработающие ссылки на странице")
+	}
+
+	if internalLinks == 0 && len(data.Links) > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "no_internal_links",
+			"severity":    "medium",
+			"description": "На странице нет внутренних ссылок",
+		})
+		a.AddRecommendation("Добавьте внутренние ссылки для улучшения навигации и индексации")
+	}
+}
+
+// analyzeCanonical проверяет canonical URL
+func (a *SEOAnalyzer) analyzeCanonical(data *parser.WebsiteData) {
+	canonicalURL := ""
+	for key, value := range data.MetaTags {
+		if key == "canonical" {
+			canonicalURL = value
+			break
+		}
+	}
+	a.SetMetric("canonical_url", canonicalURL)
+
+	if canonicalURL == "" {
+		a.AddIssue(map[string]interface{}{
+			"type":        "missing_canonical",
+			"severity":    "low",
+			"description": "На странице отсутствует канонический URL",
+		})
+		a.AddRecommendation("Добавьте канонический URL для предотвращения проблем с дублированным контентом")
+	}
+}
+
+// analyzeKeywords анализирует плотность ключевых слов
+func (a *SEOAnalyzer) analyzeKeywords(data *parser.WebsiteData) {
+	words := strings.Fields(strings.ToLower(data.TextContent))
+	wordCount := make(map[string]int)
+	totalWords := len(words)
+
+	if totalWords == 0 {
+		return
+	}
+
+	for _, word := range words {
+		// Пропускаем короткие слова и стоп-слова
+		if len(word) <= 2 || isStopWord(word) {
+			continue
+		}
+		// Удаляем пунктуацию
+		word = strings.Trim(word, ".,?!:;()")
+		if word != "" {
+			wordCount[word]++
+		}
+	}
+
+	keywordDensity := make(map[string]float64)
+	for word, count := range wordCount {
+		if count >= 3 { // Учитываем только слова, которые появляются не менее 3 раз
+			keywordDensity[word] = float64(count) / float64(totalWords) * 100
+		}
+	}
+	a.SetMetric("keyword_density", keywordDensity)
+
+	// Проверка на переоптимизацию
+	highDensityKeywords := []string{}
+	for word, density := range keywordDensity {
+		if density > 5.0 {
+			highDensityKeywords = append(highDensityKeywords, word)
+		}
+	}
+
+	if len(highDensityKeywords) > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "keyword_stuffing",
+			"severity":    "medium",
+			"description": "Возможная переоптимизация ключевых слов",
+			"keywords":    highDensityKeywords,
+		})
+		a.AddRecommendation("Избегайте слишком частого использования ключевых слов")
+	}
+}
+
+// isStopWord проверяет, является ли слово стоп-словом
 func isStopWord(word string) bool {
 	stopWords := map[string]bool{
 		"а": true, "без": true, "более": true, "бы": true, "был": true, "была": true, "были": true, "было": true,
@@ -249,15 +297,13 @@ func isStopWord(word string) bool {
 		"эти": true, "это": true, "я": true,
 		"the": true, "of": true, "and": true, "a": true, "to": true, "in": true, "is": true, "you": true,
 		"that": true, "it": true, "he": true, "was": true, "for": true, "on": true, "are": true, "as": true,
-		"with": true, "his": true, "they": true, "I": true, "at": true, "be": true, "this": true, "have": true,
+		"with": true, "his": true, "they": true, "at": true, "be": true, "this": true, "have": true,
 		"from": true, "or": true, "one": true, "had": true, "by": true, "but": true, "not": true, "what": true,
 		"all": true, "were": true, "we": true, "when": true, "your": true, "can": true, "said": true, "there": true,
 		"use": true, "an": true, "each": true, "which": true, "she": true, "do": true, "how": true, "their": true,
 		"if": true, "will": true, "up": true, "other": true, "about": true, "out": true, "many": true, "then": true,
 		"them": true, "these": true, "so": true, "some": true, "her": true, "would": true, "make": true, "like": true,
 		"him": true, "into": true, "time": true, "has": true, "look": true, "two": true, "more": true, "go": true,
-		"see": true, "no": true, "way": true, "could": true, "my": true, "than": true, "been": true, "who": true,
-		"its": true, "now": true, "did": true, "get": true, "come": true,
 	}
 	return stopWords[word]
 }

@@ -97,11 +97,11 @@ paths:
       summary: Create a new website analysis
       tags:
       - analysis
-  /analysis/{id}:
+  /analysis/{id}/score:
     get:
       consumes:
       - application/json
-      description: Retrieves details of a specific analysis
+      description: Calculates and returns the overall score for all analysis categories
       parameters:
       - description: Analysis ID
         in: path
@@ -112,22 +112,12 @@ paths:
       - application/json
       responses:
         "200":
-          description: Analysis details
+          description: Overall score data
           schema:
             additionalProperties: true
             type: object
         "400":
-          description: Invalid request
-          schema:
-            additionalProperties: true
-            type: object
-        "401":
-          description: Unauthorized
-          schema:
-            additionalProperties: true
-            type: object
-        "403":
-          description: Forbidden
+          description: Invalid analysis ID
           schema:
             additionalProperties: true
             type: object
@@ -136,9 +126,58 @@ paths:
           schema:
             additionalProperties: true
             type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
       security:
       - BearerAuth: []
-      summary: Get analysis details
+      summary: Get overall analysis score
+      tags:
+      - analysis
+  /analysis/{id}/summary/{category}:
+    get:
+      consumes:
+      - application/json
+      description: Returns a summary of analysis results for a specific category
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Analysis category (seo, performance, structure, etc.)
+        in: path
+        name: category
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Category summary data
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid analysis ID
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Metrics not found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get analysis category summary
       tags:
       - analysis
   /auth/login:
@@ -361,6 +400,35 @@ paths:
       summary: Create a new website
       tags:
       - websites
+  /ws/analysis/{id}:
+    get:
+      consumes:
+      - application/json
+      description: WebSocket endpoint for receiving real-time analysis status updates
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "101":
+          description: Switching protocols to WebSocket
+        "400":
+          description: Invalid analysis ID
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Analysis not found
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Real-time analysis updates
+      tags:
+      - analysis
 schemes:
 - http
 - https

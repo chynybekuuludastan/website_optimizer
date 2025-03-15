@@ -4,201 +4,302 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/PuerkitoBio/goquery"
+
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
 )
 
-// SecurityResult contains the security analysis results
-type SecurityResult struct {
-	Score             float64                  `json:"score"`
-	HasHTTPS          bool                     `json:"has_https"`
-	MissingSecHeaders []string                 `json:"missing_security_headers"`
-	HasCSP            bool                     `json:"has_content_security_policy"`
-	HasXSSProtection  bool                     `json:"has_xss_protection"`
-	HasHSTS           bool                     `json:"has_hsts"`
-	InsecureCookies   []string                 `json:"insecure_cookies"`
-	MixedContent      []string                 `json:"mixed_content"`
-	Issues            []map[string]interface{} `json:"issues"`
-	Recommendations   []string                 `json:"recommendations"`
+// SecurityAnalyzer анализирует аспекты безопасности веб-сайта
+type SecurityAnalyzer struct {
+	*BaseAnalyzer
 }
 
-// AnalyzeSecurity performs security analysis on the website data
-func AnalyzeSecurity(data *parser.WebsiteData) map[string]interface{} {
-	result := SecurityResult{
-		MissingSecHeaders: []string{},
-		InsecureCookies:   []string{},
-		MixedContent:      []string{},
-		Issues:            []map[string]interface{}{},
-		Recommendations:   []string{},
+// NewSecurityAnalyzer создает новый анализатор безопасности
+func NewSecurityAnalyzer() *SecurityAnalyzer {
+	return &SecurityAnalyzer{
+		BaseAnalyzer: NewBaseAnalyzer(),
+	}
+}
+
+// Analyze выполняет анализ безопасности веб-сайта
+func (a *SecurityAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interface{}, error) {
+	// Анализ с помощью goquery
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(data.HTML))
+	if err != nil {
+		return a.GetMetrics(), err
 	}
 
-	// Check for HTTPS
+	// Проверка HTTPS
+	a.analyzeHTTPS(data)
+
+	// Проверка заголовков безопасности
+	a.analyzeSecurityHeaders(data)
+
+	// Проверка смешанного контента
+	a.analyzeMixedContent(data)
+
+	// Проверка защиты от CSRF
+	a.analyzeCSRF(doc)
+
+	// Проверка наличия встроенного JavaScript
+	a.analyzeInlineJS(data)
+
+	// Проверка наличия устаревших, небезопасных API
+	a.analyzeDeprecatedAPIs(data)
+
+	// Проверка наличия метаданных, указывающих на X-Frame-Options
+	a.analyzeXFrameOptions(data)
+
+	// Расчет общей оценки
+	score := a.CalculateScore()
+
+	// HTTPS имеет большое влияние на оценку
+	if !a.GetMetrics()["has_https"].(bool) {
+		score -= 30
+	}
+
+	// Убедимся, что оценка между 0 и 100
+	if score < 0 {
+		score = 0
+	}
+	a.SetMetric("score", score)
+
+	return a.GetMetrics(), nil
+}
+
+// analyzeHTTPS проверяет использование HTTPS
+func (a *SecurityAnalyzer) analyzeHTTPS(data *parser.WebsiteData) {
 	parsedURL, err := url.Parse(data.URL)
+	hasHTTPS := false
+
 	if err == nil {
-		result.HasHTTPS = parsedURL.Scheme == "https"
+		hasHTTPS = parsedURL.Scheme == "https"
 	}
 
-	if !result.HasHTTPS {
-		result.Issues = append(result.Issues, map[string]interface{}{
+	a.SetMetric("has_https", hasHTTPS)
+
+	if !hasHTTPS {
+		a.AddIssue(map[string]interface{}{
 			"type":        "no_https",
 			"severity":    "high",
-			"description": "The website does not use HTTPS",
+			"description": "Сайт не использует HTTPS",
 		})
-		result.Recommendations = append(result.Recommendations, "Enable HTTPS to secure data transmission")
+		a.AddRecommendation("Включите HTTPS для защиты передачи данных")
 	}
+}
 
-	// Check for security headers
-	// Note: In a real implementation, these would come from HTTP response headers
-	// For this example, we'll just detect them from HTML meta tags or assume they're missing
+// analyzeSecurityHeaders проверяет заголовки безопасности
+func (a *SecurityAnalyzer) analyzeSecurityHeaders(data *parser.WebsiteData) {
+	// В реальной реализации эти данные будут из HTTP-заголовков ответа
+	// Для этого примера мы определим их из HTML-мета-тегов или предположим, что они отсутствуют
 
-	// Check for Content-Security-Policy
-	result.HasCSP = false
+	missingSecHeaders := []string{}
+
+	// Проверка Content-Security-Policy
+	hasCSP := false
 	for key, value := range data.MetaTags {
 		if key == "content-security-policy" && value != "" {
-			result.HasCSP = true
+			hasCSP = true
 			break
 		}
 	}
-	if !result.HasCSP {
-		result.MissingSecHeaders = append(result.MissingSecHeaders, "Content-Security-Policy")
-		result.Issues = append(result.Issues, map[string]interface{}{
+	a.SetMetric("has_content_security_policy", hasCSP)
+
+	if !hasCSP {
+		missingSecHeaders = append(missingSecHeaders, "Content-Security-Policy")
+		a.AddIssue(map[string]interface{}{
 			"type":        "missing_csp",
 			"severity":    "medium",
-			"description": "Content Security Policy is not implemented",
+			"description": "Content Security Policy не реализована",
 		})
-		result.Recommendations = append(result.Recommendations, "Implement Content Security Policy to prevent XSS attacks")
+		a.AddRecommendation("Реализуйте Content Security Policy для предотвращения XSS-атак")
 	}
 
-	// Check for X-XSS-Protection
-	result.HasXSSProtection = false
+	// Проверка X-XSS-Protection
+	hasXSSProtection := false
 	for key, value := range data.MetaTags {
 		if key == "x-xss-protection" && value != "" {
-			result.HasXSSProtection = true
+			hasXSSProtection = true
 			break
 		}
 	}
-	if !result.HasXSSProtection {
-		result.MissingSecHeaders = append(result.MissingSecHeaders, "X-XSS-Protection")
-		result.Issues = append(result.Issues, map[string]interface{}{
+	a.SetMetric("has_xss_protection", hasXSSProtection)
+
+	if !hasXSSProtection {
+		missingSecHeaders = append(missingSecHeaders, "X-XSS-Protection")
+		a.AddIssue(map[string]interface{}{
 			"type":        "missing_xss_protection",
 			"severity":    "medium",
-			"description": "X-XSS-Protection header is not implemented",
+			"description": "Заголовок X-XSS-Protection не реализован",
 		})
-		result.Recommendations = append(result.Recommendations, "Add X-XSS-Protection header to help prevent XSS attacks")
+		a.AddRecommendation("Добавьте заголовок X-XSS-Protection для защиты от XSS-атак")
 	}
 
-	// Check for HSTS
-	result.HasHSTS = false
+	// Проверка HSTS
+	hasHSTS := false
 	for key, value := range data.MetaTags {
 		if key == "strict-transport-security" && value != "" {
-			result.HasHSTS = true
+			hasHSTS = true
 			break
 		}
 	}
-	if !result.HasHSTS && result.HasHTTPS {
-		result.MissingSecHeaders = append(result.MissingSecHeaders, "Strict-Transport-Security")
-		result.Issues = append(result.Issues, map[string]interface{}{
+	a.SetMetric("has_hsts", hasHSTS)
+
+	if !hasHSTS && a.GetMetrics()["has_https"].(bool) {
+		missingSecHeaders = append(missingSecHeaders, "Strict-Transport-Security")
+		a.AddIssue(map[string]interface{}{
 			"type":        "missing_hsts",
 			"severity":    "medium",
-			"description": "HTTP Strict Transport Security is not implemented",
+			"description": "HTTP Strict Transport Security не реализован",
 		})
-		result.Recommendations = append(result.Recommendations, "Implement HSTS to enforce secure connections")
+		a.AddRecommendation("Реализуйте HSTS для принудительного использования безопасных соединений")
 	}
 
-	// Check for mixed content
-	if result.HasHTTPS {
-		// Check for HTTP resources on HTTPS page
+	a.SetMetric("missing_security_headers", missingSecHeaders)
+}
+
+// analyzeMixedContent проверяет наличие смешанного контента
+func (a *SecurityAnalyzer) analyzeMixedContent(data *parser.WebsiteData) {
+	mixedContent := []string{}
+
+	if a.GetMetrics()["has_https"].(bool) {
+		// Проверка HTTP-ресурсов на HTTPS-странице
 		for _, img := range data.Images {
 			if strings.HasPrefix(img.URL, "http:") {
-				result.MixedContent = append(result.MixedContent, img.URL)
-				result.Issues = append(result.Issues, map[string]interface{}{
+				mixedContent = append(mixedContent, img.URL)
+				a.AddIssue(map[string]interface{}{
 					"type":        "mixed_content",
 					"severity":    "high",
-					"description": "Mixed content: HTTP resource on HTTPS page",
+					"description": "Смешанный контент: HTTP-ресурс на HTTPS-странице",
 					"url":         img.URL,
 				})
 			}
 		}
+
 		for _, script := range data.Scripts {
 			if strings.HasPrefix(script.URL, "http:") {
-				result.MixedContent = append(result.MixedContent, script.URL)
-				result.Issues = append(result.Issues, map[string]interface{}{
+				mixedContent = append(mixedContent, script.URL)
+				a.AddIssue(map[string]interface{}{
 					"type":        "mixed_content",
 					"severity":    "high",
-					"description": "Mixed content: HTTP script on HTTPS page",
+					"description": "Смешанный контент: HTTP-скрипт на HTTPS-странице",
 					"url":         script.URL,
 				})
 			}
 		}
+
 		for _, style := range data.Styles {
 			if strings.HasPrefix(style.URL, "http:") {
-				result.MixedContent = append(result.MixedContent, style.URL)
-				result.Issues = append(result.Issues, map[string]interface{}{
+				mixedContent = append(mixedContent, style.URL)
+				a.AddIssue(map[string]interface{}{
 					"type":        "mixed_content",
 					"severity":    "high",
-					"description": "Mixed content: HTTP stylesheet on HTTPS page",
+					"description": "Смешанный контент: HTTP-стиль на HTTPS-странице",
 					"url":         style.URL,
 				})
 			}
 		}
-		if len(result.MixedContent) > 0 {
-			result.Recommendations = append(result.Recommendations, "Fix mixed content by updating all resources to use HTTPS")
-		}
 	}
 
-	// Check for forms without CSRF protection
-	if strings.Contains(data.HTML, "<form") && !strings.Contains(data.HTML, "csrf") {
-		result.Issues = append(result.Issues, map[string]interface{}{
+	a.SetMetric("mixed_content", mixedContent)
+
+	if len(mixedContent) > 0 {
+		a.AddRecommendation("Исправьте смешанный контент, обновив все ресурсы для использования HTTPS")
+	}
+}
+
+// analyzeCSRF проверяет защиту от CSRF
+func (a *SecurityAnalyzer) analyzeCSRF(doc *goquery.Document) {
+	forms := doc.Find("form")
+	formsWithoutCSRF := 0
+
+	forms.Each(func(i int, s *goquery.Selection) {
+		// Проверяем наличие CSRF-токена
+		csrfFields := s.Find("input[name*='csrf'], input[name*='token'], input[name*='_token']")
+		if csrfFields.Length() == 0 {
+			formsWithoutCSRF++
+		}
+	})
+
+	a.SetMetric("forms_without_csrf", formsWithoutCSRF)
+
+	if forms.Length() > 0 && formsWithoutCSRF > 0 {
+		a.AddIssue(map[string]interface{}{
 			"type":        "possible_csrf_vulnerability",
 			"severity":    "high",
-			"description": "Forms found without obvious CSRF protection",
+			"description": "Формы найдены без очевидной CSRF-защиты",
+			"count":       formsWithoutCSRF,
 		})
-		result.Recommendations = append(result.Recommendations, "Implement CSRF tokens for all forms")
+		a.AddRecommendation("Реализуйте CSRF-токены для всех форм")
 	}
+}
 
-	// Check for use of inline JavaScript (potential XSS vulnerability)
-	if strings.Contains(data.HTML, "<script>") || strings.Contains(data.HTML, "javascript:") {
-		result.Issues = append(result.Issues, map[string]interface{}{
+// analyzeInlineJS проверяет наличие встроенного JavaScript
+func (a *SecurityAnalyzer) analyzeInlineJS(data *parser.WebsiteData) {
+	hasInlineJS := strings.Contains(data.HTML, "<script>") || strings.Contains(data.HTML, "javascript:")
+	a.SetMetric("has_inline_js", hasInlineJS)
+
+	if hasInlineJS {
+		a.AddIssue(map[string]interface{}{
 			"type":        "inline_js",
 			"severity":    "medium",
-			"description": "Inline JavaScript found, which can be a security risk",
+			"description": "Найден встроенный JavaScript, который может быть угрозой безопасности",
 		})
-		result.Recommendations = append(result.Recommendations, "Avoid inline JavaScript and use external scripts with CSP")
+		a.AddRecommendation("Избегайте встроенного JavaScript и используйте внешние скрипты с CSP")
+	}
+}
+
+// analyzeDeprecatedAPIs проверяет наличие устаревших, небезопасных API
+func (a *SecurityAnalyzer) analyzeDeprecatedAPIs(data *parser.WebsiteData) {
+	deprecatedAPIs := []string{}
+
+	// Проверяем использование устаревших API
+	if strings.Contains(data.HTML, "document.write") {
+		deprecatedAPIs = append(deprecatedAPIs, "document.write")
 	}
 
-	// Calculate score based on issues
-	score := 100.0
-	for _, issue := range result.Issues {
-		severity := issue["severity"].(string)
-		switch severity {
-		case "high":
-			score -= 20
-		case "medium":
-			score -= 10
-		case "low":
-			score -= 5
+	if strings.Contains(data.HTML, "eval(") {
+		deprecatedAPIs = append(deprecatedAPIs, "eval")
+	}
+
+	if strings.Contains(data.HTML, "localStorage") {
+		// localStorage сам по себе не устаревший, но рискованный для хранения чувствительных данных
+		deprecatedAPIs = append(deprecatedAPIs, "localStorage для чувствительных данных")
+	}
+
+	a.SetMetric("deprecated_apis", deprecatedAPIs)
+
+	if len(deprecatedAPIs) > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "deprecated_apis",
+			"severity":    "medium",
+			"description": "Использование устаревших или небезопасных API",
+			"apis":        deprecatedAPIs,
+		})
+		a.AddRecommendation("Замените устаревшие и небезопасные API современными и безопасными альтернативами")
+	}
+}
+
+// analyzeXFrameOptions проверяет настройку X-Frame-Options
+func (a *SecurityAnalyzer) analyzeXFrameOptions(data *parser.WebsiteData) {
+	hasXFrameOptions := false
+
+	// Проверка мета-тегов на X-Frame-Options
+	for key, value := range data.MetaTags {
+		if key == "x-frame-options" && (value == "DENY" || value == "SAMEORIGIN") {
+			hasXFrameOptions = true
+			break
 		}
 	}
 
-	// HTTPS has a big impact on score
-	if !result.HasHTTPS {
-		score -= 30
-	}
+	a.SetMetric("has_x_frame_options", hasXFrameOptions)
 
-	// Ensure score is between 0 and 100
-	if score < 0 {
-		score = 0
-	}
-	result.Score = score
-
-	return map[string]interface{}{
-		"score":                       result.Score,
-		"has_https":                   result.HasHTTPS,
-		"missing_security_headers":    result.MissingSecHeaders,
-		"has_content_security_policy": result.HasCSP,
-		"has_xss_protection":          result.HasXSSProtection,
-		"has_hsts":                    result.HasHSTS,
-		"mixed_content":               result.MixedContent,
-		"issues":                      result.Issues,
-		"recommendations":             result.Recommendations,
+	if !hasXFrameOptions {
+		a.AddIssue(map[string]interface{}{
+			"type":        "missing_x_frame_options",
+			"severity":    "medium",
+			"description": "Отсутствует защита от кликджекинга (X-Frame-Options)",
+		})
+		a.AddRecommendation("Добавьте заголовок X-Frame-Options для предотвращения кликджекинга")
 	}
 }

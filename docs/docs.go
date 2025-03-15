@@ -84,14 +84,14 @@ const docTemplate = `{
                 }
             }
         },
-        "/analysis/{id}": {
+        "/analysis/{id}/score": {
             "get": {
                 "security": [
                     {
                         "BearerAuth": []
                     }
                 ],
-                "description": "Retrieves details of a specific analysis",
+                "description": "Calculates and returns the overall score for all analysis categories",
                 "consumes": [
                     "application/json"
                 ],
@@ -101,7 +101,7 @@ const docTemplate = `{
                 "tags": [
                     "analysis"
                 ],
-                "summary": "Get analysis details",
+                "summary": "Get overall analysis score",
                 "parameters": [
                     {
                         "type": "string",
@@ -113,28 +113,14 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Analysis details",
+                        "description": "Overall score data",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
                         }
                     },
                     "400": {
-                        "description": "Invalid request",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "403": {
-                        "description": "Forbidden",
+                        "description": "Invalid analysis ID",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -142,6 +128,79 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Analysis not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/analysis/{id}/summary/{category}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns a summary of analysis results for a specific category",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "analysis"
+                ],
+                "summary": "Get analysis category summary",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Analysis ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Analysis category (seo, performance, structure, etc.)",
+                        "name": "category",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Category summary data",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid analysis ID",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Metrics not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -472,6 +531,49 @@ const docTemplate = `{
                     },
                     "500": {
                         "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/ws/analysis/{id}": {
+            "get": {
+                "description": "WebSocket endpoint for receiving real-time analysis status updates",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "analysis"
+                ],
+                "summary": "Real-time analysis updates",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Analysis ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "101": {
+                        "description": "Switching protocols to WebSocket"
+                    },
+                    "400": {
+                        "description": "Invalid analysis ID",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Analysis not found",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true

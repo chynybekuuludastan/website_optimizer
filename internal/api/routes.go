@@ -54,26 +54,13 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 	// Analysis routes
 	analysis := api.Group("/analysis")
 	analysis.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.CreateAnalysis)
-	analysis.Get("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.ListAnalyses)
-	analysis.Get("/public", analysisHandler.ListPublicAnalyses)
 
-	// Protected analysis routes
+	// Только реализованные методы
 	protectedAnalysis := analysis.Group("/:id", middleware.JWTMiddleware(cfg))
-	protectedAnalysis.Get("/", analysisHandler.GetAnalysis)
-	protectedAnalysis.Delete("/", middleware.AnalystOrAdmin(), analysisHandler.DeleteAnalysis)
-	protectedAnalysis.Patch("/public", middleware.AnalystOrAdmin(), analysisHandler.UpdatePublicStatus)
 
-	// Analysis metrics and results
-	protectedAnalysis.Get("/metrics", analysisHandler.GetMetrics)
-	protectedAnalysis.Get("/metrics/:category", analysisHandler.GetMetricsByCategory)
-	protectedAnalysis.Get("/issues", analysisHandler.GetIssues)
-	protectedAnalysis.Get("/recommendations", analysisHandler.GetRecommendations)
-
-	// Content improvements
-	protectedAnalysis.Get("/content-improvements", analysisHandler.GetContentImprovements)
-	protectedAnalysis.Post("/content-improvements", middleware.AnalystOrAdmin(), analysisHandler.GenerateContentImprovements)
-	protectedAnalysis.Get("/code-snippets", analysisHandler.GetCodeSnippets)
-	protectedAnalysis.Post("/code-snippets", middleware.AnalystOrAdmin(), analysisHandler.GenerateCodeSnippets)
+	// Новые маршруты для анализаторов (только существующие методы)
+	protectedAnalysis.Get("/score", analysisHandler.GetOverallScore)
+	protectedAnalysis.Get("/summary/:category", analysisHandler.GetCategorySummary)
 
 	// WebSocket endpoint for real-time analysis updates
 	app.Use("/ws", func(c *fiber.Ctx) error {
@@ -83,5 +70,5 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 		return c.SendStatus(fiber.StatusUpgradeRequired)
 	})
 
-	app.Get("/ws/analysis/:id", middleware.JWTMiddleware(cfg), websocket.New(analysisHandler.HandleWebSocket))
+	app.Get("/ws/analysis/:id", websocket.New(analysisHandler.HandleWebSocket))
 }

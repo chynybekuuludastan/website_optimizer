@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -13,30 +14,22 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/database"
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/analyzer"
-	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
 )
 
-// AnalysisHandler handles website analysis requests
+// AnalysisHandler обрабатывает запросы по анализу веб-сайтов
 type AnalysisHandler struct {
 	DB          *database.DatabaseClient
 	RedisClient *database.RedisClient
 	Config      *config.Config
-	LLMClient   *llm.OpenAIClient
 }
 
-// AnalysisRequest represents a request to analyze a website
-type AnalysisRequest struct {
-	URL string `json:"url" validate:"required,url"`
-}
-
-// NewAnalysisHandler creates a new analysis handler
+// NewAnalysisHandler создает новый обработчик анализа
 func NewAnalysisHandler(db *database.DatabaseClient, redisClient *database.RedisClient, cfg *config.Config) *AnalysisHandler {
 	return &AnalysisHandler{
 		DB:          db,
 		RedisClient: redisClient,
 		Config:      cfg,
-		LLMClient:   llm.NewOpenAIClient(cfg.OpenAIAPIKey),
 	}
 }
 
@@ -53,10 +46,10 @@ func NewAnalysisHandler(db *database.DatabaseClient, redisClient *database.Redis
 // @Security BearerAuth
 // @Router /analysis [post]
 func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
-	// Get user ID from context
+	// Получаем ID пользователя из контекста
 	userID := c.Locals("userID").(uuid.UUID)
 
-	// Parse request
+	// Разбираем запрос
 	req := new(AnalysisRequest)
 	if err := c.BodyParser(req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -65,11 +58,11 @@ func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 		})
 	}
 
-	// Create or get website
+	// Создаем или получаем веб-сайт
 	var website models.Website
 	result := h.DB.Where("url = ?", req.URL).First(&website)
 	if result.Error != nil {
-		// Website not found, create new one
+		// Веб-сайт не найден, создаем новый
 		website = models.Website{
 			URL: req.URL,
 		}
@@ -81,7 +74,7 @@ func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 		}
 	}
 
-	// Create analysis
+	// Создаем анализ
 	analysis := models.Analysis{
 		WebsiteID: website.ID,
 		UserID:    userID,
@@ -96,7 +89,7 @@ func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 		})
 	}
 
-	// Start analysis in background
+	// Запускаем анализ в фоновом режиме
 	go h.runAnalysis(analysis.ID, req.URL)
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
@@ -108,15 +101,15 @@ func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 	})
 }
 
-// runAnalysis performs the actual website analysis
+// runAnalysis выполняет фактический анализ веб-сайта
 func (h *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
-	// Update analysis status
+	// Обновляем статус анализа
 	if err := h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Update("status", "running").Error; err != nil {
 		return
 	}
 
-	// Parse website
-	websiteData, err := parser.ParseWebsite(url, parser.ParseOptions{Timeout: 30 * time.Second})
+	// Парсим веб-сайт
+	websiteData, err := parser.ParseWebsite(url, parser.ParseOptions{Timeout: h.Config.AnalysisTimeout})
 	if err != nil {
 		h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
 			"status":       "failed",
@@ -126,276 +119,121 @@ func (h *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 		return
 	}
 
-	// Update website info
+	// Обновляем информацию о веб-сайте
 	h.DB.Model(&models.Website{}).Where("url = ?", url).Updates(map[string]interface{}{
 		"title":       websiteData.Title,
 		"description": websiteData.Description,
 	})
 
-	// Run different analyzers
-	seoResults := analyzer.AnalyzeSEO(websiteData)
-	performanceResults := analyzer.AnalyzePerformance(websiteData)
-	securityResults := analyzer.AnalyzeSecurity(websiteData)
-	accessibilityResults := analyzer.AnalyzeAccessibility(websiteData)
+	// Создаем менеджер анализаторов
+	manager := analyzer.NewAnalyzerManager()
+	manager.RegisterAllAnalyzers()
 
-	// Save metrics to database
-	saveMetric(h.DB, analysisID, "seo", "seo_score", seoResults)
-	saveMetric(h.DB, analysisID, "performance", "load_time", performanceResults)
-	saveMetric(h.DB, analysisID, "security", "security_score", securityResults)
-	saveMetric(h.DB, analysisID, "accessibility", "accessibility_score", accessibilityResults)
+	// Запускаем все анализаторы
+	results, err := manager.RunAllAnalyzers(websiteData)
+	if err != nil {
+		h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
+			"status":       "failed",
+			"completed_at": time.Now(),
+			"metadata":     datatypes.JSON([]byte(`{"error": "` + err.Error() + `"}`)),
+		})
+		return
+	}
 
-	// Generate recommendations
-	generateRecommendations(h.DB, analysisID, websiteData, seoResults, performanceResults, securityResults, accessibilityResults)
+	// Сохраняем метрики в базу данных
+	for analyzerType, result := range results {
+		metricData, _ := json.Marshal(result)
+		metric := models.AnalysisMetric{
+			AnalysisID: analysisID,
+			Category:   string(analyzerType),
+			Name:       string(analyzerType) + "_score",
+			Value:      datatypes.JSON(metricData),
+		}
+		h.DB.Create(&metric)
+	}
 
-	// Update analysis as completed
+	// Сохраняем проблемы
+	allIssues := manager.GetAllIssues()
+	for analyzerType, issues := range allIssues {
+		for _, issue := range issues {
+			severity := issue["severity"].(string)
+			description := issue["description"].(string)
+
+			// Создаем запись о проблеме
+			issueRecord := models.Issue{
+				AnalysisID:  analysisID,
+				Category:    string(analyzerType),
+				Severity:    severity,
+				Title:       description,
+				Description: description,
+			}
+
+			// Если есть дополнительные данные, сохраняем их в Location
+			if location, ok := issue["url"].(string); ok {
+				issueRecord.Location = location
+			} else if count, ok := issue["count"].(int); ok {
+				issueRecord.Location = fmt.Sprintf("Count: %d", count)
+			}
+
+			h.DB.Create(&issueRecord)
+		}
+	}
+
+	// Сохраняем рекомендации
+	allRecommendations := manager.GetAllRecommendations()
+	for analyzerType, recommendations := range allRecommendations {
+		for _, rec := range recommendations {
+			priority := "medium" // Значение по умолчанию
+
+			// Определение приоритета на основе типа анализатора
+			switch analyzerType {
+			case analyzer.SEOType, analyzer.SecurityType:
+				priority = "high"
+			case analyzer.PerformanceType, analyzer.AccessibilityType:
+				priority = "medium"
+			case analyzer.StructureType, analyzer.MobileType, analyzer.ContentType:
+				priority = "low"
+			}
+
+			// Создаем запись рекомендации
+			recommendation := models.Recommendation{
+				AnalysisID:  analysisID,
+				Category:    string(analyzerType),
+				Priority:    priority,
+				Title:       rec,
+				Description: rec,
+			}
+
+			h.DB.Create(&recommendation)
+		}
+	}
+
+	// Обновляем анализ как завершенный
 	h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
 		"status":       "completed",
 		"completed_at": time.Now(),
 	})
 }
 
-// saveMetric saves a metric to the database
-func saveMetric(db *database.DatabaseClient, analysisID uuid.UUID, category, name string, value interface{}) {
-	jsonValue, _ := json.Marshal(value)
-	metric := models.AnalysisMetric{
-		AnalysisID: analysisID,
-		Category:   category,
-		Name:       name,
-		Value:      datatypes.JSON(jsonValue),
-	}
-	db.Create(&metric)
-}
-
-// generateRecommendations creates recommendations based on analysis results
-func generateRecommendations(db *database.DatabaseClient, analysisID uuid.UUID, data *parser.WebsiteData, seoResults, performanceResults, securityResults, accessibilityResults interface{}) {
-	// This is a simplified example - in a real application, you would implement more complex logic
-
-	// SEO recommendations
-	seoMap, ok := seoResults.(map[string]interface{})
-	if ok {
-		if seoMap["missing_meta_description"] == true {
-			db.Create(&models.Recommendation{
-				AnalysisID:  analysisID,
-				Category:    "seo",
-				Priority:    "high",
-				Title:       "Add Meta Description",
-				Description: "Your page is missing a meta description tag. Meta descriptions help search engines understand the content of your page.",
-				CodeSnippet: `<meta name="description" content="Your description here">`,
-			})
-		}
-	}
-
-	// Performance recommendations
-	perfMap, ok := performanceResults.(map[string]interface{})
-	if ok {
-		if imgSize, exists := perfMap["large_images"].([]map[string]interface{}); exists && len(imgSize) > 0 {
-			db.Create(&models.Recommendation{
-				AnalysisID:  analysisID,
-				Category:    "performance",
-				Priority:    "medium",
-				Title:       "Optimize Images",
-				Description: "Some images on your site are not optimized, which can slow down page loading.",
-				CodeSnippet: ``,
-			})
-		}
-	}
-
-	// Here, add more recommendations based on security and accessibility results
-}
-
-// @Summary Get analysis details
-// @Description Retrieves details of a specific analysis
+// @Summary Get overall analysis score
+// @Description Calculates and returns the overall score for all analysis categories
 // @Tags analysis
 // @Accept json
 // @Produce json
 // @Param id path string true "Analysis ID"
-// @Success 200 {object} map[string]interface{} "Analysis details"
-// @Failure 400 {object} map[string]interface{} "Invalid request"
-// @Failure 401 {object} map[string]interface{} "Unauthorized"
-// @Failure 403 {object} map[string]interface{} "Forbidden"
+// @Success 200 {object} map[string]interface{} "Overall score data"
+// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
 // @Failure 404 {object} map[string]interface{} "Analysis not found"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
 // @Security BearerAuth
-// @Router /analysis/{id} [get]
-func (h *AnalysisHandler) GetAnalysis(c *fiber.Ctx) error {
+// @Router /analysis/{id}/score [get]
+func (h *AnalysisHandler) GetOverallScore(c *fiber.Ctx) error {
 	id := c.Params("id")
 	analysisID, err := uuid.Parse(id)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	var analysis models.Analysis
-	if err := h.DB.Preload("Website").Preload("User").First(&analysis, analysisID).Error; err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "Analysis not found",
-		})
-	}
-
-	// Check if user can access this analysis
-	userID := c.Locals("userID").(uuid.UUID)
-	role := c.Locals("role").(string)
-	if analysis.UserID != userID && role != "admin" && !analysis.IsPublic {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"success": false,
-			"error":   "You don't have permission to view this analysis",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    analysis,
-	})
-}
-
-// ListAnalyses lists all analyses for a user
-func (h *AnalysisHandler) ListAnalyses(c *fiber.Ctx) error {
-	userID := c.Locals("userID").(uuid.UUID)
-	role := c.Locals("role").(string)
-
-	var analyses []models.Analysis
-	query := h.DB.Preload("Website")
-
-	// If not admin, limit to user's own analyses
-	if role != "admin" {
-		query = query.Where("user_id = ?", userID)
-	}
-
-	if err := query.Find(&analyses).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to fetch analyses",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    analyses,
-	})
-}
-
-// ListPublicAnalyses lists all public analyses
-func (h *AnalysisHandler) ListPublicAnalyses(c *fiber.Ctx) error {
-	var analyses []models.Analysis
-	if err := h.DB.Preload("Website").Where("is_public = ?", true).Find(&analyses).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to fetch public analyses",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    analyses,
-	})
-}
-
-// DeleteAnalysis deletes an analysis
-func (h *AnalysisHandler) DeleteAnalysis(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	var analysis models.Analysis
-	if err := h.DB.First(&analysis, analysisID).Error; err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "Analysis not found",
-		})
-	}
-
-	// Check if user can delete this analysis
-	userID := c.Locals("userID").(uuid.UUID)
-	role := c.Locals("role").(string)
-	if analysis.UserID != userID && role != "admin" {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"success": false,
-			"error":   "You don't have permission to delete this analysis",
-		})
-	}
-
-	if err := h.DB.Delete(&analysis).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to delete analysis",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"message": "Analysis deleted successfully",
-	})
-}
-
-// UpdatePublicStatus updates the public status of an analysis
-func (h *AnalysisHandler) UpdatePublicStatus(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	var analysis models.Analysis
-	if err := h.DB.First(&analysis, analysisID).Error; err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "Analysis not found",
-		})
-	}
-
-	// Check if user can update this analysis
-	userID := c.Locals("userID").(uuid.UUID)
-	role := c.Locals("role").(string)
-	if analysis.UserID != userID && role != "admin" {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"success": false,
-			"error":   "You don't have permission to update this analysis",
-		})
-	}
-
-	type UpdateRequest struct {
-		IsPublic bool `json:"is_public"`
-	}
-
-	var req UpdateRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid request body",
-		})
-	}
-
-	if err := h.DB.Model(&analysis).Update("is_public", req.IsPublic).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to update analysis public status",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"message": "Analysis public status updated successfully",
-	})
-}
-
-// GetMetrics returns all metrics for an analysis
-func (h *AnalysisHandler) GetMetrics(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
+			"error":   "Недопустимый ID анализа",
 		})
 	}
 
@@ -403,18 +241,55 @@ func (h *AnalysisHandler) GetMetrics(c *fiber.Ctx) error {
 	if err := h.DB.Where("analysis_id = ?", analysisID).Find(&metrics).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   "Failed to fetch metrics",
+			"error":   "Не удалось получить метрики",
 		})
+	}
+
+	// Вычисляем общий балл на основе всех категорий
+	totalScore := 0.0
+	count := 0
+
+	for _, metric := range metrics {
+		var result map[string]interface{}
+		if err := json.Unmarshal(metric.Value, &result); err != nil {
+			continue
+		}
+
+		if score, ok := result["score"].(float64); ok {
+			totalScore += score
+			count++
+		}
+	}
+
+	// Вычисляем средний балл
+	averageScore := 0.0
+	if count > 0 {
+		averageScore = totalScore / float64(count)
 	}
 
 	return c.JSON(fiber.Map{
 		"success": true,
-		"data":    metrics,
+		"data": fiber.Map{
+			"overall_score":  averageScore,
+			"category_count": count,
+		},
 	})
 }
 
-// GetMetricsByCategory returns metrics for an analysis filtered by category
-func (h *AnalysisHandler) GetMetricsByCategory(c *fiber.Ctx) error {
+// @Summary Get analysis category summary
+// @Description Returns a summary of analysis results for a specific category
+// @Tags analysis
+// @Accept json
+// @Produce json
+// @Param id path string true "Analysis ID"
+// @Param category path string true "Analysis category (seo, performance, structure, etc.)"
+// @Success 200 {object} map[string]interface{} "Category summary data"
+// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
+// @Failure 404 {object} map[string]interface{} "Metrics not found"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /analysis/{id}/summary/{category} [get]
+func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
 	id := c.Params("id")
 	category := c.Params("category")
 
@@ -422,308 +297,185 @@ func (h *AnalysisHandler) GetMetricsByCategory(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,
-			"error":   "Invalid analysis ID",
+			"error":   "Недопустимый ID анализа",
 		})
 	}
 
-	var metrics []models.AnalysisMetric
-	if err := h.DB.Where("analysis_id = ? AND category = ?", analysisID, category).Find(&metrics).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to fetch metrics",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    metrics,
-	})
-}
-
-// GetIssues returns all issues for an analysis
-func (h *AnalysisHandler) GetIssues(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	var issues []models.Issue
-	if err := h.DB.Where("analysis_id = ?", analysisID).Find(&issues).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to fetch issues",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    issues,
-	})
-}
-
-// GetRecommendations returns all recommendations for an analysis
-func (h *AnalysisHandler) GetRecommendations(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	var recommendations []models.Recommendation
-	if err := h.DB.Where("analysis_id = ?", analysisID).Find(&recommendations).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to fetch recommendations",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    recommendations,
-	})
-}
-
-// GetContentImprovements returns all content improvements for an analysis
-func (h *AnalysisHandler) GetContentImprovements(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	var improvements []models.ContentImprovement
-	if err := h.DB.Where("analysis_id = ?", analysisID).Find(&improvements).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to fetch content improvements",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    improvements,
-	})
-}
-
-// GenerateContentImprovements generates content improvements using LLM
-func (h *AnalysisHandler) GenerateContentImprovements(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	var analysis models.Analysis
-	if err := h.DB.Preload("Website").First(&analysis, analysisID).Error; err != nil {
+	// Получаем метрики для категории
+	var metric models.AnalysisMetric
+	if err := h.DB.Where("analysis_id = ? AND category = ?", analysisID, category).First(&metric).Error; err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
-			"error":   "Analysis not found",
+			"error":   "Метрики не найдены",
 		})
 	}
 
-	type ContentRequest struct {
-		Title     string `json:"title"`
-		CTAButton string `json:"cta_button"`
-		Content   string `json:"content"`
-	}
-
-	var req ContentRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid request body",
-		})
-	}
-
-	improvements, err := h.LLMClient.GenerateContentImprovements(
-		analysis.Website.URL,
-		req.Title,
-		req.CTAButton,
-		req.Content,
-	)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to generate content improvements: " + err.Error(),
-		})
-	}
-
-	// Save heading improvement
-	if heading, ok := improvements["heading"]; ok {
-		h.DB.Create(&models.ContentImprovement{
-			AnalysisID:      analysisID,
-			ElementType:     "heading",
-			OriginalContent: req.Title,
-			ImprovedContent: heading,
-			LLMModel:        h.LLMClient.Model,
-		})
-	}
-
-	// Save CTA button improvement
-	if cta, ok := improvements["cta_button"]; ok {
-		h.DB.Create(&models.ContentImprovement{
-			AnalysisID:      analysisID,
-			ElementType:     "cta_button",
-			OriginalContent: req.CTAButton,
-			ImprovedContent: cta,
-			LLMModel:        h.LLMClient.Model,
-		})
-	}
-
-	// Save text content improvement
-	if content, ok := improvements["improved_content"]; ok {
-		h.DB.Create(&models.ContentImprovement{
-			AnalysisID:      analysisID,
-			ElementType:     "content",
-			OriginalContent: req.Content,
-			ImprovedContent: content,
-			LLMModel:        h.LLMClient.Model,
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    improvements,
-	})
-}
-
-// GetCodeSnippets returns generated code snippets for an analysis
-func (h *AnalysisHandler) GetCodeSnippets(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
+	// Получаем проблемы и рекомендации
+	var issues []models.Issue
+	h.DB.Where("analysis_id = ? AND category = ?", analysisID, category).Find(&issues)
 
 	var recommendations []models.Recommendation
-	if err := h.DB.Where("analysis_id = ? AND code_snippet != ''", analysisID).Find(&recommendations).Error; err != nil {
+	h.DB.Where("analysis_id = ? AND category = ?", analysisID, category).Find(&recommendations)
+
+	// Парсим результаты метрик
+	var result map[string]interface{}
+	if err := json.Unmarshal(metric.Value, &result); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   "Failed to fetch code snippets",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    recommendations,
-	})
-}
-
-// GenerateCodeSnippets generates code snippets for content improvements
-func (h *AnalysisHandler) GenerateCodeSnippets(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	type CodeRequest struct {
-		HTML                string `json:"html"`
-		ContentImprovements string `json:"content_improvements"`
-	}
-
-	var req CodeRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid request body",
-		})
-	}
-
-	code, err := h.LLMClient.GenerateCodeSnippet(req.HTML, req.ContentImprovements)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to generate code snippet: " + err.Error(),
-		})
-	}
-
-	// Create a recommendation with the generated code
-	recommendation := models.Recommendation{
-		AnalysisID:  analysisID,
-		Category:    "content",
-		Priority:    "medium",
-		Title:       "Improved HTML Implementation",
-		Description: "Generated HTML code with improved content",
-		CodeSnippet: code,
-	}
-
-	if err := h.DB.Create(&recommendation).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to save code snippet: " + err.Error(),
+			"error":   "Не удалось обработать метрики",
 		})
 	}
 
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": fiber.Map{
-			"code_snippet": code,
-			"id":           recommendation.ID,
+			"metrics":               result,
+			"issues":                issues,
+			"recommendations":       recommendations,
+			"score":                 result["score"],
+			"issues_count":          len(issues),
+			"recommendations_count": len(recommendations),
 		},
 	})
 }
 
-// HandleWebSocket handles WebSocket connections for real-time analysis updates
+// @Summary Real-time analysis updates
+// @Description WebSocket endpoint for receiving real-time analysis status updates
+// @Tags analysis
+// @Accept json
+// @Produce json
+// @Param id path string true "Analysis ID"
+// @Success 101 {object} nil "Switching protocols to WebSocket"
+// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
+// @Failure 404 {object} map[string]interface{} "Analysis not found"
+// @Router /ws/analysis/{id} [get]
 func (h *AnalysisHandler) HandleWebSocket(c *websocket.Conn) {
-	// Get analysis ID from URL
+	// Получаем ID анализа из URL
 	id := c.Params("id")
 	analysisID, err := uuid.Parse(id)
 	if err != nil {
+		c.WriteJSON(fiber.Map{
+			"success": false,
+			"error":   "Недопустимый ID анализа",
+		})
 		c.Close()
 		return
 	}
 
-	// Simple implementation - in a real app, you would implement pub/sub
-	// to notify when analysis status changes
+	// Получаем данные анализа
+	var analysis models.Analysis
+	if err := h.DB.Select("id, status, completed_at").First(&analysis, analysisID).Error; err != nil {
+		c.WriteJSON(fiber.Map{
+			"success": false,
+			"error":   "Анализ не найден",
+		})
+		c.Close()
+		return
+	}
+
+	// Периодическая проверка статуса
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
+	// Канал для обработки закрытия соединения
+	disconnect := make(chan bool)
+
+	// Обработка входящих сообщений (включая закрытие)
+	go func() {
+		for {
+			messageType, _, err := c.ReadMessage()
+			if err != nil || messageType == websocket.CloseMessage {
+				disconnect <- true
+				break
+			}
+		}
+	}()
+
+	// Основной цикл отправки обновлений
 	for {
 		select {
 		case <-ticker.C:
-			var analysis models.Analysis
+			// Обновляем данные анализа
 			if err := h.DB.Select("id, status, completed_at").First(&analysis, analysisID).Error; err != nil {
 				c.WriteJSON(fiber.Map{
-					"error": "Analysis not found",
+					"success": false,
+					"error":   "Ошибка получения анализа",
 				})
 				c.Close()
 				return
 			}
 
+			// Отправляем текущий статус клиенту
 			if err := c.WriteJSON(fiber.Map{
-				"id":           analysis.ID,
-				"status":       analysis.Status,
-				"completed_at": analysis.CompletedAt,
+				"success": true,
+				"data": fiber.Map{
+					"id":           analysis.ID,
+					"status":       analysis.Status,
+					"completed_at": analysis.CompletedAt,
+				},
 			}); err != nil {
 				c.Close()
 				return
 			}
 
-			// If analysis is completed or failed, close the connection
+			// Проверяем завершение анализа
 			if analysis.Status == "completed" || analysis.Status == "failed" {
+				// Получаем общий результат, если анализ завершен
+				if analysis.Status == "completed" {
+					// Вычисляем общий балл
+					var metrics []models.AnalysisMetric
+					h.DB.Where("analysis_id = ?", analysisID).Find(&metrics)
+
+					totalScore := 0.0
+					count := 0
+					categoryScores := make(map[string]float64)
+
+					for _, metric := range metrics {
+						var result map[string]interface{}
+						if err := json.Unmarshal(metric.Value, &result); err != nil {
+							continue
+						}
+
+						if score, ok := result["score"].(float64); ok {
+							totalScore += score
+							count++
+							categoryScores[metric.Category] = score
+						}
+					}
+
+					// Вычисляем средний балл
+					averageScore := 0.0
+					if count > 0 {
+						averageScore = totalScore / float64(count)
+					}
+
+					// Отправляем итоговые результаты
+					c.WriteJSON(fiber.Map{
+						"success": true,
+						"data": fiber.Map{
+							"id":              analysis.ID,
+							"status":          "completed",
+							"completed_at":    analysis.CompletedAt,
+							"overall_score":   averageScore,
+							"category_count":  count,
+							"category_scores": categoryScores,
+						},
+					})
+				}
+
+				// Закрываем соединение после завершения
 				c.Close()
 				return
 			}
+
+		case <-disconnect:
+			// Клиент отключился
+			return
 		}
 	}
+}
+
+// AnalysisRequest представляет запрос на анализ веб-сайта
+type AnalysisRequest struct {
+	URL string `json:"url" validate:"required,url"`
 }
