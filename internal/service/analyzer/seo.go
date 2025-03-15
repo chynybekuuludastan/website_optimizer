@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"context"
 	"strings"
 
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
@@ -14,100 +15,109 @@ type SEOAnalyzer struct {
 // NewSEOAnalyzer создает новый SEO-анализатор
 func NewSEOAnalyzer() *SEOAnalyzer {
 	return &SEOAnalyzer{
-		BaseAnalyzer: NewBaseAnalyzer(),
+		BaseAnalyzer: NewBaseAnalyzer(SEOType),
 	}
 }
 
 // Analyze выполняет SEO-анализ данных веб-сайта
-func (a *SEOAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interface{}, error) {
-	// Проверка мета-тегов title и description
-	a.analyzeTitleAndDescription(data)
+func (a *SEOAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteData, prevResults map[AnalyzerType]map[string]interface{}) (map[string]interface{}, error) {
+	// Проверка контекста
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 
-	// Анализ структуры заголовков
+	// Проверяем, доступны ли результаты Lighthouse
+	lighthouseUsed := false
+	titleChecked := false
+	metaDescChecked := false
+
+	if lighthouseResults, ok := prevResults[LighthouseType]; ok {
+		// Используем SEO оценку из Lighthouse если она доступна
+		if categoryScores, ok := lighthouseResults["category_scores"].(map[string]float64); ok {
+			if seoScore, ok := categoryScores["seo"]; ok {
+				a.SetMetric("lighthouse_seo_score", seoScore*100)
+				lighthouseUsed = true
+			}
+		}
+
+		// Определяем SEO-релевантные аудиты
+		seoAuditTypes := map[string]bool{
+			"meta-description": true,
+			"document-title":   true,
+			"hreflang":         true,
+			"canonical":        true,
+			"robots-txt":       true,
+			"link-text":        true,
+			"is-crawlable":     true,
+			"image-alt":        true,
+			"structured-data":  true,
+		}
+
+		// Извлекаем данные аудитов
+		seoAudits := extractAuditsData(lighthouseResults, seoAuditTypes)
+
+		if len(seoAudits) > 0 {
+			a.SetMetric("lighthouse_seo_audits", seoAudits)
+
+			// Проверяем наличие конкретных аудитов
+			_, titleChecked = seoAudits["document-title"]
+			_, metaDescChecked = seoAudits["meta-description"]
+
+			// Получаем проблемы из аудитов
+			seoIssues := getAuditIssues(seoAudits, 0.9)
+
+			// Добавляем проблемы и рекомендации
+			for _, issue := range seoIssues {
+				a.AddIssue(issue)
+				if description, ok := issue["details"].(string); ok {
+					a.AddRecommendation(description)
+				}
+			}
+		}
+	}
+
+	// Проверка мета-тегов title и description только если не проверено Lighthouse
+	if !titleChecked || !metaDescChecked {
+		a.analyzeTitleAndDescription(data)
+	}
+
 	a.analyzeHeadings(data)
-
-	// Проверка альтернативных текстов для изображений
 	a.analyzeImages(data)
-
-	// Анализ ссылок
 	a.analyzeLinks(data)
-
-	// Проверка canonical URL
 	a.analyzeCanonical(data)
-
-	// Анализ плотности ключевых слов
 	a.analyzeKeywords(data)
 
 	// Расчет общей оценки
-	score := a.CalculateScore()
+	var score float64
+
+	if lighthouseScore, ok := a.GetMetrics()["lighthouse_seo_score"].(float64); ok && lighthouseUsed {
+		score = lighthouseScore*0.7 + a.CalculateScore()*0.3
+	} else {
+		score = a.CalculateScore()
+	}
+
+	// Нормализация оценки
+	if score < 0 {
+		score = 0
+	} else if score > 100 {
+		score = 100
+	}
+
 	a.SetMetric("score", score)
 
 	return a.GetMetrics(), nil
 }
 
-// analyzeTitleAndDescription проверяет мета-теги title и description
-func (a *SEOAnalyzer) analyzeTitleAndDescription(data *parser.WebsiteData) {
-	// Проверка мета-тега title
-	missingMetaTitle := data.Title == ""
-	metaTitleLength := len(data.Title)
-
-	a.SetMetric("missing_meta_title", missingMetaTitle)
-	a.SetMetric("meta_title_length", metaTitleLength)
-
-	if missingMetaTitle {
-		a.AddIssue(map[string]interface{}{
-			"type":        "missing_title",
-			"severity":    "high",
-			"description": "На странице отсутствует тег title",
-		})
-		a.AddRecommendation("Добавьте информативный title-тег на страницу")
-	} else if metaTitleLength < 30 || metaTitleLength > 60 {
-		a.AddIssue(map[string]interface{}{
-			"type":        "title_length",
-			"severity":    "medium",
-			"description": "Тег title либо слишком короткий, либо слишком длинный",
-			"current":     metaTitleLength,
-			"recommended": "30-60 символов",
-		})
-		if metaTitleLength < 30 {
-			a.AddRecommendation("Сделайте title-тег более информативным (минимум 30 символов)")
-		} else {
-			a.AddRecommendation("Сократите title-тег (рекомендуется максимум 60 символов)")
-		}
+// getSeverityFromScore определяет уровень серьезности на основе оценки Lighthouse
+func getSeverityFromScore(score float64) string {
+	if score < 0.3 {
+		return "high"
+	} else if score < 0.7 {
+		return "medium"
 	}
-
-	// Проверка мета-тега description
-	metaDesc := ""
-	if desc, ok := data.MetaTags["description"]; ok {
-		metaDesc = desc
-	}
-	missingMetaDesc := metaDesc == ""
-	metaDescLength := len(metaDesc)
-
-	a.SetMetric("missing_meta_description", missingMetaDesc)
-	a.SetMetric("meta_description_length", metaDescLength)
-
-	if missingMetaDesc {
-		a.AddIssue(map[string]interface{}{
-			"type":        "missing_description",
-			"severity":    "high",
-			"description": "На странице отсутствует мета-тег description",
-		})
-		a.AddRecommendation("Добавьте мета-тег description с кратким описанием содержания страницы")
-	} else if metaDescLength < 50 || metaDescLength > 160 {
-		a.AddIssue(map[string]interface{}{
-			"type":        "description_length",
-			"severity":    "medium",
-			"description": "Мета-тег description либо слишком короткий, либо слишком длинный",
-			"current":     metaDescLength,
-			"recommended": "50-160 символов",
-		})
-		if metaDescLength < 50 {
-			a.AddRecommendation("Сделайте мета-тег description более информативным (минимум 50 символов)")
-		} else {
-			a.AddRecommendation("Сократите мета-тег description (рекомендуется максимум 160 символов)")
-		}
-	}
+	return "low"
 }
 
 // analyzeHeadings анализирует структуру заголовков
@@ -306,4 +316,69 @@ func isStopWord(word string) bool {
 		"him": true, "into": true, "time": true, "has": true, "look": true, "two": true, "more": true, "go": true,
 	}
 	return stopWords[word]
+}
+
+// analyzeTitleAndDescription проверяет мета-теги title и description
+func (a *SEOAnalyzer) analyzeTitleAndDescription(data *parser.WebsiteData) {
+	// Проверка мета-тега title
+	missingMetaTitle := data.Title == ""
+	metaTitleLength := len(data.Title)
+
+	a.SetMetric("missing_meta_title", missingMetaTitle)
+	a.SetMetric("meta_title_length", metaTitleLength)
+
+	if missingMetaTitle {
+		a.AddIssue(map[string]interface{}{
+			"type":        "missing_title",
+			"severity":    "high",
+			"description": "На странице отсутствует тег title",
+		})
+		a.AddRecommendation("Добавьте информативный title-тег на страницу")
+	} else if metaTitleLength < 30 || metaTitleLength > 60 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "title_length",
+			"severity":    "medium",
+			"description": "Тег title либо слишком короткий, либо слишком длинный",
+			"current":     metaTitleLength,
+			"recommended": "30-60 символов",
+		})
+		if metaTitleLength < 30 {
+			a.AddRecommendation("Сделайте title-тег более информативным (минимум 30 символов)")
+		} else {
+			a.AddRecommendation("Сократите title-тег (рекомендуется максимум 60 символов)")
+		}
+	}
+
+	// Проверка мета-тега description
+	metaDesc := ""
+	if desc, ok := data.MetaTags["description"]; ok {
+		metaDesc = desc
+	}
+	missingMetaDesc := metaDesc == ""
+	metaDescLength := len(metaDesc)
+
+	a.SetMetric("missing_meta_description", missingMetaDesc)
+	a.SetMetric("meta_description_length", metaDescLength)
+
+	if missingMetaDesc {
+		a.AddIssue(map[string]interface{}{
+			"type":        "missing_description",
+			"severity":    "high",
+			"description": "На странице отсутствует мета-тег description",
+		})
+		a.AddRecommendation("Добавьте мета-тег description с кратким описанием содержания страницы")
+	} else if metaDescLength < 50 || metaDescLength > 160 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "description_length",
+			"severity":    "medium",
+			"description": "Мета-тег description либо слишком короткий, либо слишком длинный",
+			"current":     metaDescLength,
+			"recommended": "50-160 символов",
+		})
+		if metaDescLength < 50 {
+			a.AddRecommendation("Сделайте мета-тег description более информативным (минимум 50 символов)")
+		} else {
+			a.AddRecommendation("Сократите мета-тег description (рекомендуется максимум 160 символов)")
+		}
+	}
 }

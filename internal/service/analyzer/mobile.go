@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"context"
 	"regexp"
 	"strings"
 
@@ -16,44 +17,111 @@ type MobileAnalyzer struct {
 // NewMobileAnalyzer создает новый анализатор мобильной адаптивности
 func NewMobileAnalyzer() *MobileAnalyzer {
 	return &MobileAnalyzer{
-		BaseAnalyzer: NewBaseAnalyzer(),
+		BaseAnalyzer: NewBaseAnalyzer(MobileType),
 	}
 }
 
 // Analyze выполняет анализ мобильной адаптивности
-func (a *MobileAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interface{}, error) {
+func (a *MobileAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteData, prevResults map[AnalyzerType]map[string]interface{}) (map[string]interface{}, error) {
+	// Проверка контекста
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Проверяем, использовался ли Lighthouse для мобильного устройства
+	mobileDataFromLighthouse := false
+
+	if lighthouseResults, ok := prevResults[LighthouseType]; ok {
+		// Определяем, был ли Lighthouse запущен для мобильного устройства
+		if configSettings, ok := lighthouseResults["config_settings"].(map[string]interface{}); ok {
+			if formFactor, ok := configSettings["formFactor"].(string); ok && formFactor == "mobile" {
+				mobileDataFromLighthouse = true
+				a.SetMetric("lighthouse_mobile_mode", true)
+
+				// Получаем оценки из Lighthouse
+				if categoryScores, ok := lighthouseResults["category_scores"].(map[string]float64); ok {
+					// Мобильная оценка - среднее между производительностью и доступностью для мобильных
+					mobileFriendlyScore := (categoryScores["performance"] + categoryScores["accessibility"]) / 2 * 100
+					a.SetMetric("lighthouse_mobile_score", mobileFriendlyScore)
+				}
+
+				// Определяем аудиты, связанные с мобильной адаптивностью
+				mobileAuditTypes := map[string]bool{
+					"viewport":               true,
+					"content-width":          true,
+					"tap-targets":            true,
+					"font-size":              true,
+					"mobile-friendly":        true,
+					"content-size":           true,
+					"image-size-responsive":  true,
+					"uses-responsive-images": true,
+					"meta-viewport":          true,
+					"user-scalable":          true,
+					"touch-action":           true,
+					"uses-rel-preconnect":    true,
+				}
+
+				// Извлекаем данные аудитов мобильной адаптивности
+				mobileAudits := extractAuditsData(lighthouseResults, mobileAuditTypes)
+
+				if len(mobileAudits) > 0 {
+					a.SetMetric("lighthouse_mobile_audits", mobileAudits)
+
+					// Получаем проблемы из аудитов
+					mobileIssues := getAuditIssues(mobileAudits, 0.9)
+
+					// Добавляем проблемы и рекомендации
+					for _, issue := range mobileIssues {
+						a.AddIssue(issue)
+						if description, ok := issue["details"].(string); ok {
+							a.AddRecommendation(description)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Даже если у нас есть данные Lighthouse, некоторые проверки мы всё равно выполним
 	// Анализ HTML-документа с помощью goquery
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(data.HTML))
 	if err != nil {
 		return a.GetMetrics(), err
 	}
 
-	// Проверка наличия метатега viewport
+	// Проверка наличия метатега viewport (всегда проверяем)
 	a.analyzeViewport(doc)
 
-	// Проверка использования медиа-запросов
-	a.analyzeMediaQueries(data)
-
-	// Проверка размера шрифта и читаемости
-	a.analyzeFontSize(data)
-
-	// Проверка размера элементов для сенсорного ввода
-	a.analyzeTouchTargets(doc)
-
-	// Проверка ширины контента
-	a.analyzeContentWidth(doc)
-
-	// Проверка использования фиксированных размеров
-	a.analyzeFixedSizes(data)
-
-	// Проверка оптимизации изображений
-	a.analyzeImageOptimization(data)
-
-	// Проверка наличия мобильных шаблонов
-	a.analyzeMobileTemplates(data)
+	// Если у нас нет достаточных данных от Lighthouse в мобильном режиме,
+	// выполняем все наши проверки
+	if !mobileDataFromLighthouse {
+		a.analyzeMediaQueries(data)
+		a.analyzeFontSize(data)
+		a.analyzeTouchTargets(doc)
+		a.analyzeContentWidth(doc)
+		a.analyzeFixedSizes(data)
+		a.analyzeImageOptimization(data)
+		a.analyzeMobileTemplates(data)
+	}
 
 	// Расчет общей оценки
-	score := a.CalculateScore()
+	var score float64
+
+	if mobileScore, ok := a.GetMetrics()["lighthouse_mobile_score"].(float64); ok && mobileDataFromLighthouse {
+		score = mobileScore*0.7 + a.CalculateScore()*0.3
+	} else {
+		score = a.CalculateScore()
+	}
+
+	// Нормализация оценки
+	if score < 0 {
+		score = 0
+	} else if score > 100 {
+		score = 100
+	}
+
 	a.SetMetric("score", score)
 
 	return a.GetMetrics(), nil

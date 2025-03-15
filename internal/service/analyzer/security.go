@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"context"
 	"net/url"
 	"strings"
 
@@ -17,38 +18,85 @@ type SecurityAnalyzer struct {
 // NewSecurityAnalyzer создает новый анализатор безопасности
 func NewSecurityAnalyzer() *SecurityAnalyzer {
 	return &SecurityAnalyzer{
-		BaseAnalyzer: NewBaseAnalyzer(),
+		BaseAnalyzer: NewBaseAnalyzer(SecurityType),
 	}
 }
 
 // Analyze выполняет анализ безопасности веб-сайта
-func (a *SecurityAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interface{}, error) {
+func (a *SecurityAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteData, prevResults map[AnalyzerType]map[string]interface{}) (map[string]interface{}, error) {
+	// Проверка контекста
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Проверяем, доступны ли результаты других анализаторов
+	hasBestPracticesData := false
+
+	if lighthouseResults, ok := prevResults[LighthouseType]; ok {
+		// Проверяем аудиты best-practices из Lighthouse, которые связаны с безопасностью
+		if categoryScores, ok := lighthouseResults["category_scores"].(map[string]float64); ok {
+			if bestPracticesScore, ok := categoryScores["best-practices"]; ok {
+				a.SetMetric("lighthouse_best_practices_score", bestPracticesScore*100)
+				hasBestPracticesData = true
+			}
+		}
+
+		// Определяем аудиты, связанные с безопасностью
+		securityAuditTypes := map[string]bool{
+			"is-on-https":                        true,
+			"no-vulnerable-libraries":            true,
+			"uses-http2":                         true,
+			"uses-passive-event-listeners":       true,
+			"doctype":                            true,
+			"geolocation-on-start":               true,
+			"notification-on-start":              true,
+			"password-inputs-can-be-pasted-into": true,
+			"external-anchors-use-rel-noopener":  true,
+			"js-libraries":                       true,
+			"deprecations":                       true,
+			"errors-in-console":                  true,
+			"valid-source-maps":                  true,
+		}
+
+		// Извлекаем данные аудитов безопасности
+		securityAudits := extractAuditsData(lighthouseResults, securityAuditTypes)
+
+		if len(securityAudits) > 0 {
+			a.SetMetric("lighthouse_security_audits", securityAudits)
+
+			// Получаем проблемы из аудитов
+			securityIssues := getAuditIssues(securityAudits, 0.9)
+
+			// Добавляем проблемы и рекомендации
+			for _, issue := range securityIssues {
+				a.AddIssue(issue)
+				if description, ok := issue["details"].(string); ok {
+					a.AddRecommendation(description)
+				}
+			}
+		}
+	}
+
 	// Анализ с помощью goquery
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(data.HTML))
 	if err != nil {
 		return a.GetMetrics(), err
 	}
 
-	// Проверка HTTPS
+	// Проверка HTTPS - всегда выполняем, так как это базовая проверка безопасности
 	a.analyzeHTTPS(data)
 
-	// Проверка заголовков безопасности
-	a.analyzeSecurityHeaders(data)
-
-	// Проверка смешанного контента
-	a.analyzeMixedContent(data)
-
-	// Проверка защиты от CSRF
-	a.analyzeCSRF(doc)
-
-	// Проверка наличия встроенного JavaScript
-	a.analyzeInlineJS(data)
-
-	// Проверка наличия устаревших, небезопасных API
-	a.analyzeDeprecatedAPIs(data)
-
-	// Проверка наличия метаданных, указывающих на X-Frame-Options
-	a.analyzeXFrameOptions(data)
+	// Проверки, которые можно пропустить, если у нас есть достаточно данных из Lighthouse
+	if !hasBestPracticesData {
+		a.analyzeSecurityHeaders(data)
+		a.analyzeMixedContent(data)
+		a.analyzeCSRF(doc)
+		a.analyzeInlineJS(data)
+		a.analyzeDeprecatedAPIs(data)
+		a.analyzeXFrameOptions(data)
+	}
 
 	// Расчет общей оценки
 	score := a.CalculateScore()
@@ -58,9 +106,17 @@ func (a *SecurityAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interfa
 		score -= 30
 	}
 
+	// Если есть оценка best-practices из Lighthouse, учитываем ее
+	if bestPracticesScore, ok := a.GetMetrics()["lighthouse_best_practices_score"].(float64); ok && hasBestPracticesData {
+		// Комбинируем наши проверки безопасности с результатами Lighthouse
+		score = score*0.6 + bestPracticesScore*0.4
+	}
+
 	// Убедимся, что оценка между 0 и 100
 	if score < 0 {
 		score = 0
+	} else if score > 100 {
+		score = 100
 	}
 	a.SetMetric("score", score)
 

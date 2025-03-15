@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"context"
 	"regexp"
 	"strings"
 
@@ -17,50 +18,111 @@ type AccessibilityAnalyzer struct {
 // NewAccessibilityAnalyzer создает новый анализатор доступности
 func NewAccessibilityAnalyzer() *AccessibilityAnalyzer {
 	return &AccessibilityAnalyzer{
-		BaseAnalyzer: NewBaseAnalyzer(),
+		BaseAnalyzer: NewBaseAnalyzer(AccessibilityType),
 	}
 }
 
 // Analyze выполняет анализ доступности сайта
-func (a *AccessibilityAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interface{}, error) {
+func (a *AccessibilityAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteData, prevResults map[AnalyzerType]map[string]interface{}) (map[string]interface{}, error) {
+	// Проверка контекста
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Проверяем, доступны ли результаты Lighthouse
+	lighthouseUsed := false
+
+	if lighthouseResults, ok := prevResults[LighthouseType]; ok {
+		// Используем оценку доступности из Lighthouse если она доступна
+		if categoryScores, ok := lighthouseResults["category_scores"].(map[string]float64); ok {
+			if accessibilityScore, ok := categoryScores["accessibility"]; ok {
+				a.SetMetric("lighthouse_accessibility_score", accessibilityScore*100)
+				lighthouseUsed = true
+			}
+		}
+
+		// Определяем релевантные для доступности аудиты
+		accessibilityAuditTypes := map[string]bool{
+			"aria-required-attr":         true,
+			"aria-roles":                 true,
+			"aria-valid-attr":            true,
+			"button-name":                true,
+			"color-contrast":             true,
+			"document-title":             true,
+			"duplicate-id-aria":          true,
+			"form-field-multiple-labels": true,
+			"heading-order":              true,
+			"html-has-lang":              true,
+			"image-alt":                  true,
+			"input-image-alt":            true,
+			"label":                      true,
+			"link-name":                  true,
+			"list":                       true,
+			"meta-viewport":              true,
+			"tabindex":                   true,
+			"td-headers-attr":            true,
+			"valid-lang":                 true,
+		}
+
+		// Извлекаем данные аудитов доступности
+		accessibilityAudits := extractAuditsData(lighthouseResults, accessibilityAuditTypes)
+
+		if len(accessibilityAudits) > 0 {
+			a.SetMetric("lighthouse_accessibility_audits", accessibilityAudits)
+
+			// Получаем проблемы из аудитов
+			accessibilityIssues := getAuditIssues(accessibilityAudits, 0.9)
+
+			// Добавляем проблемы и рекомендации
+			for _, issue := range accessibilityIssues {
+				a.AddIssue(issue)
+				if description, ok := issue["details"].(string); ok {
+					a.AddRecommendation(description)
+				}
+			}
+		}
+	}
+
 	// Анализ с помощью goquery
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(data.HTML))
 	if err != nil {
 		return a.GetMetrics(), err
 	}
 
-	// Проверка изображений без alt-текста
-	a.analyzeMissingAltText(data, doc)
-
-	// Проверка форм с отсутствующими метками
-	a.analyzeMissingLabels(doc)
-
-	// Проверка потенциальных проблем с контрастностью
-	a.analyzeContrastIssues(data)
-
-	// Проверка использования ARIA-атрибутов
-	a.analyzeAriaAttributes(doc)
-
-	// Проверка использования семантического HTML
-	a.analyzeSemanticHTML(doc)
-
-	// Проверка наличия skip-ссылок для клавиатурной навигации
-	a.analyzeSkipLinks(doc)
-
-	// Проверка наличия проблем с tabindex
-	a.analyzeTabindex(doc)
-
-	// Проверка доступности форм
-	a.analyzeFormsAccessibility(doc)
-
-	// Проверка размера шрифта
-	a.analyzeFontSize(data)
-
-	// Проверка языка страницы
+	// Проверки, которые следует всегда выполнять
 	a.analyzeLanguage(doc)
 
+	// Если Lighthouse не дал достаточно данных, выполняем полный анализ
+	if !lighthouseUsed {
+		a.analyzeMissingAltText(data, doc)
+		a.analyzeMissingLabels(doc)
+		a.analyzeContrastIssues(data)
+		a.analyzeAriaAttributes(doc)
+		a.analyzeSemanticHTML(doc)
+		a.analyzeSkipLinks(doc)
+		a.analyzeTabindex(doc)
+		a.analyzeFormsAccessibility(doc)
+		a.analyzeFontSize(data)
+	}
+
 	// Расчет общей оценки
-	score := a.CalculateScore()
+	var score float64
+
+	if lighthouseScore, ok := a.GetMetrics()["lighthouse_accessibility_score"].(float64); ok && lighthouseUsed {
+		score = lighthouseScore*0.8 + a.CalculateScore()*0.2
+	} else {
+		score = a.CalculateScore()
+	}
+
+	// Нормализация оценки
+	if score < 0 {
+		score = 0
+	} else if score > 100 {
+		score = 100
+	}
+
 	a.SetMetric("score", score)
 
 	return a.GetMetrics(), nil

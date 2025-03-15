@@ -20,15 +20,15 @@ type LighthouseAnalyzer struct {
 // NewLighthouseAnalyzer создает новый анализатор Lighthouse
 func NewLighthouseAnalyzer(cfg *config.Config) *LighthouseAnalyzer {
 	return &LighthouseAnalyzer{
-		BaseAnalyzer:     NewBaseAnalyzer(),
-		LighthouseClient: lighthouse.NewClient(cfg.LighthouseURL, "AIzaSyDtb0Y0XFZrWE1GN3GkKKnN00pzHWnK-Dk"),
+		BaseAnalyzer:     NewBaseAnalyzer(LighthouseType),
+		LighthouseClient: lighthouse.NewClient(cfg.LighthouseURL, cfg.LighthouseAPIKey),
 		Config:           cfg,
 	}
 }
 
 // Analyze выполняет анализ сайта с помощью Lighthouse
-func (a *LighthouseAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interface{}, error) {
-	// Настройка опций аудита с учетом предпочитаемого устройства
+func (a *LighthouseAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteData, prevResults map[AnalyzerType]map[string]interface{}) (map[string]interface{}, error) {
+	// Настройка опций аудита
 	options := lighthouse.DefaultAuditOptions()
 
 	// Определяем все нужные категории анализа
@@ -39,7 +39,7 @@ func (a *LighthouseAnalyzer) Analyze(data *parser.WebsiteData) (map[string]inter
 		lighthouse.CategorySEO,           // SEO
 	}
 
-	// Устанавливаем мобильный или десктопный режим на основе конфигурации
+	// Устанавливаем мобильный или десктопный режим
 	if a.Config.LighthouseMobileMode {
 		options.FormFactor = lighthouse.FormFactorMobile
 	} else {
@@ -49,16 +49,9 @@ func (a *LighthouseAnalyzer) Analyze(data *parser.WebsiteData) (map[string]inter
 	// Устанавливаем локаль
 	options.Locale = "ru"
 
-	// Выполнение аудита с таймаутом
-	// Добавляем дополнительный запас времени к таймауту на запрос
-	ctx, cancel := context.WithTimeout(
-		context.Background(),
-		time.Duration(a.Config.AnalysisTimeout+30)*time.Second,
-	)
-	defer cancel()
-
 	// Логируем начало анализа
-	a.SetMetric("lighthouse_start_time", time.Now().Format(time.RFC3339))
+	startTime := time.Now()
+	a.SetMetric("lighthouse_start_time", startTime.Format(time.RFC3339))
 	a.SetMetric("lighthouse_url", data.URL)
 
 	// Запускаем полный анализ с преобразованием результатов
@@ -82,6 +75,7 @@ func (a *LighthouseAnalyzer) Analyze(data *parser.WebsiteData) (map[string]inter
 	a.SetMetric("lighthouse_version", result.LighthouseVersion)
 	a.SetMetric("lighthouse_fetch_time", result.FetchTime)
 	a.SetMetric("lighthouse_total_time", result.TotalAnalysisTime)
+	a.SetMetric("analysis_duration", time.Since(startTime).Seconds())
 
 	// Добавляем метрики производительности
 	a.SetMetric("performance_metrics", result.Metrics)
@@ -94,18 +88,8 @@ func (a *LighthouseAnalyzer) Analyze(data *parser.WebsiteData) (map[string]inter
 	a.SetMetric("category_scores", categoryScores)
 
 	// Добавляем важные аудиты
-	importantAudits := make(map[string]interface{})
-	for id, audit := range result.Audits {
-		if audit.Score < 0.9 {
-			importantAudits[id] = map[string]interface{}{
-				"title":         audit.Title,
-				"description":   audit.Description,
-				"score":         audit.Score,
-				"display_value": audit.DisplayValue,
-			}
-		}
-	}
-	a.SetMetric("important_audits", importantAudits)
+	// Сохраняем полные данные аудитов для использования другими анализаторами
+	a.SetMetric("audits", result.Audits)
 
 	// Добавляем проблемы из Lighthouse
 	for _, issue := range result.Issues {
@@ -128,7 +112,7 @@ func (a *LighthouseAnalyzer) Analyze(data *parser.WebsiteData) (map[string]inter
 
 	score := 0.0
 	if count > 0 {
-		score = totalScore / float64(count)
+		score = totalScore / float64(count) * 100 // Нормализуем до 100
 	}
 
 	a.SetMetric("score", score)

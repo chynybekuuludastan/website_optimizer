@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"context"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -16,12 +17,63 @@ type StructureAnalyzer struct {
 // NewStructureAnalyzer создает новый анализатор структуры
 func NewStructureAnalyzer() *StructureAnalyzer {
 	return &StructureAnalyzer{
-		BaseAnalyzer: NewBaseAnalyzer(),
+		BaseAnalyzer: NewBaseAnalyzer(StructureType),
 	}
 }
 
 // Analyze выполняет анализ структуры HTML
-func (a *StructureAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interface{}, error) {
+func (a *StructureAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteData, prevResults map[AnalyzerType]map[string]interface{}) (map[string]interface{}, error) {
+	// Проверка контекста
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Проверяем, присутствуют ли уже результаты Lighthouse
+	skipFullAnalysis := false
+
+	if lighthouseResults, ok := prevResults[LighthouseType]; ok {
+		// Определяем аудиты, связанные со структурой HTML
+		structureAuditTypes := map[string]bool{
+			"document-title":         true,
+			"html-has-lang":          true,
+			"meta-description":       true,
+			"heading-order":          true,
+			"duplicate-id-active":    true,
+			"duplicate-id-aria":      true,
+			"duplicate-id":           true,
+			"table-duplicate-name":   true,
+			"td-headers-attr":        true,
+			"th-has-data-cells":      true,
+			"valid-lang":             true,
+			"html-xml-lang-mismatch": true,
+		}
+
+		// Извлекаем данные аудитов структуры
+		structureAudits := extractAuditsData(lighthouseResults, structureAuditTypes)
+
+		if len(structureAudits) > 0 {
+			a.SetMetric("lighthouse_structure_audits", structureAudits)
+
+			// Получаем проблемы из аудитов
+			structureIssues := getAuditIssues(structureAudits, 0.9)
+
+			// Добавляем проблемы и рекомендации
+			for _, issue := range structureIssues {
+				a.AddIssue(issue)
+				if description, ok := issue["details"].(string); ok {
+					a.AddRecommendation(description)
+				}
+			}
+
+			// Если есть достаточно данных от Lighthouse, можем пропустить часть анализа
+			if len(structureAudits) > 3 {
+				skipFullAnalysis = true
+			}
+		}
+	}
+
 	// Анализ HTML-структуры с помощью goquery
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(data.HTML))
 	if err != nil {
@@ -40,26 +92,16 @@ func (a *StructureAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interf
 	// Проверка наличия DOCTYPE
 	a.analyzeDoctype(data.HTML)
 
-	// Проверка семантических тегов
-	a.analyzeSemanticTags(doc)
-
-	// Проверка структуры заголовков
-	a.analyzeHeadingStructure(doc)
-
-	// Проверка атрибутов alt для изображений
-	a.analyzeImagesAlt(doc)
-
-	// Проверка доступности форм
-	a.analyzeFormAccessibility(doc)
-
-	// Проверка на наличие дублированных ID
-	a.analyzeDuplicateIds(doc)
-
-	// Проверка списков
-	a.analyzeListStructure(doc)
-
-	// Проверка таблиц
-	a.analyzeTableStructure(doc)
+	// Если результаты Lighthouse недостаточны или их нет, выполняем полный анализ
+	if !skipFullAnalysis {
+		a.analyzeSemanticTags(doc)
+		a.analyzeHeadingStructure(doc)
+		a.analyzeImagesAlt(doc)
+		a.analyzeFormAccessibility(doc)
+		a.analyzeDuplicateIds(doc)
+		a.analyzeListStructure(doc)
+		a.analyzeTableStructure(doc)
+	}
 
 	// Расчет общей оценки
 	score := a.CalculateScore()

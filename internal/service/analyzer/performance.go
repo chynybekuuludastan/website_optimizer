@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chynybekuuludastan/website_optimizer/internal/service/lighthouse"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
 )
 
@@ -21,13 +23,73 @@ type PerformanceAnalyzer struct {
 // NewPerformanceAnalyzer создает новый анализатор производительности
 func NewPerformanceAnalyzer() *PerformanceAnalyzer {
 	return &PerformanceAnalyzer{
-		BaseAnalyzer: NewBaseAnalyzer(),
+		BaseAnalyzer: NewBaseAnalyzer(PerformanceType),
 	}
 }
 
 // Analyze выполняет анализ производительности на данных веб-сайта
-func (a *PerformanceAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interface{}, error) {
-	// Базовые метрики
+func (a *PerformanceAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteData, prevResults map[AnalyzerType]map[string]interface{}) (map[string]interface{}, error) {
+	// Проверяем, доступны ли результаты Lighthouse
+	lighthouseUsed := false
+	if lighthouseResults, ok := prevResults[LighthouseType]; ok {
+		// Используем оценку производительности из Lighthouse
+		if categoryScores, ok := lighthouseResults["category_scores"].(map[string]float64); ok {
+			if perfScore, ok := categoryScores["performance"]; ok {
+				a.SetMetric("lighthouse_performance_score", perfScore*100)
+				lighthouseUsed = true
+			}
+		}
+
+		// Используем метрики производительности из Lighthouse
+		if metrics, ok := lighthouseResults["performance_metrics"].(lighthouse.MetricsResult); ok {
+			a.SetMetric("lighthouse_metrics", metrics)
+
+			// Добавляем результаты на основе метрик
+			if metrics.FirstContentfulPaint > 0 {
+				a.SetMetric("first_contentful_paint", metrics.FirstContentfulPaint)
+
+				if metrics.FirstContentfulPaint > 2000 {
+					a.AddIssue(map[string]interface{}{
+						"type":        "slow_fcp",
+						"severity":    "medium",
+						"description": "Медленный First Contentful Paint",
+						"value":       metrics.FirstContentfulPaint,
+						"threshold":   2000,
+					})
+					a.AddRecommendation("Оптимизируйте First Contentful Paint для улучшения восприятия загрузки")
+				}
+			}
+
+			if metrics.LargestContentfulPaint > 0 {
+				a.SetMetric("largest_contentful_paint", metrics.LargestContentfulPaint)
+
+				if metrics.LargestContentfulPaint > 2500 {
+					a.AddIssue(map[string]interface{}{
+						"type":        "slow_lcp",
+						"severity":    "high",
+						"description": "Медленный Largest Contentful Paint",
+						"value":       metrics.LargestContentfulPaint,
+						"threshold":   2500,
+					})
+					a.AddRecommendation("Оптимизируйте Largest Contentful Paint (LCP) для улучшения восприятия загрузки")
+				}
+			}
+
+			// Дополнительные проверки TBT, CLS и других метрик...
+		}
+
+		// Используем аудиты Lighthouse, относящиеся к производительности
+		if audits, ok := lighthouseResults["audits"].(map[string]lighthouse.Audit); ok {
+			// Фильтруем только аудиты, относящиеся к производительности
+			// и которые ещё не обработаны
+			perfAudits := filterPerformanceAudits(audits)
+			if len(perfAudits) > 0 {
+				a.SetMetric("lighthouse_performance_audits", perfAudits)
+			}
+		}
+	}
+
+	// Базовые метрики, которые мы всё равно хотим оценить
 	loadTimeSeconds := float64(data.LoadTime.Milliseconds()) / 1000.0
 	totalPageSizeBytes := int64(len(data.HTML))
 	numRequests := len(data.Images) + len(data.Scripts) + len(data.Styles) + 1 // +1 для основного HTML
@@ -36,50 +98,98 @@ func (a *PerformanceAnalyzer) Analyze(data *parser.WebsiteData) (map[string]inte
 	a.SetMetric("total_page_size_bytes", totalPageSizeBytes)
 	a.SetMetric("num_requests", numRequests)
 
-	// Проверка больших изображений
-	a.analyzeLargeImages(data)
+	// Проверки, которые не охвачены Lighthouse
+	if !lighthouseUsed || totalPageSizeBytes > 2*1024*1024 {
+		a.analyzePageSize(totalPageSizeBytes)
+	}
 
-	// Проверка ресурсов, блокирующих рендеринг
-	a.analyzeRenderBlockingResources(data)
+	if !lighthouseUsed {
+		// Проверка больших изображений
+		a.analyzeLargeImages(data)
 
-	// Проверка неминифицированных CSS и JS
-	a.analyzeMinification(data)
+		// Проверка ресурсов, блокирующих рендеринг
+		a.analyzeRenderBlockingResources(data)
 
-	// Проверка встроенных стилей
-	a.analyzeInlineStyles(data)
+		// Проверка неминифицированных CSS и JS
+		a.analyzeMinification(data)
 
-	// Оценка времени загрузки
-	a.analyzeLoadTime(loadTimeSeconds)
+		// Проверка встроенных стилей
+		a.analyzeInlineStyles(data)
 
-	// Оценка размера страницы
-	a.analyzePageSize(totalPageSizeBytes)
+		// Оценка времени загрузки
+		a.analyzeLoadTime(loadTimeSeconds)
 
-	// Оценка количества запросов
-	a.analyzeRequestCount(numRequests)
+		// Оценка количества запросов
+		a.analyzeRequestCount(numRequests)
+	}
 
 	// Расчет оценки производительности
-	score := a.CalculateScore()
+	var score float64
 
-	// Корректировка оценки на основе времени загрузки
-	if loadTimeSeconds > 0 {
-		if loadTimeSeconds < 1.0 {
-			score += 10
-		} else if loadTimeSeconds > 5.0 {
-			score -= 20
-		} else if loadTimeSeconds > 3.0 {
-			score -= 10
+	// Если есть оценка Lighthouse, учитываем ее с большим весом
+	if lighthouseScore, ok := a.GetMetrics()["lighthouse_performance_score"].(float64); ok && lighthouseUsed {
+		// Lighthouse дает результат с весом 80%, наш анализ - 20%
+		score = lighthouseScore*0.8 + a.CalculateScore()*0.2
+	} else {
+		score = a.CalculateScore()
+
+		// Корректировка на основе времени загрузки
+		if loadTimeSeconds > 0 {
+			if loadTimeSeconds < 1.0 {
+				score += 10
+			} else if loadTimeSeconds > 5.0 {
+				score -= 20
+			} else if loadTimeSeconds > 3.0 {
+				score -= 10
+			}
 		}
 	}
 
-	// Убедимся, что оценка находится между 0 и 100
+	// Нормализация оценки
 	if score < 0 {
 		score = 0
 	} else if score > 100 {
 		score = 100
 	}
+
 	a.SetMetric("score", score)
 
 	return a.GetMetrics(), nil
+}
+
+// filterPerformanceAudits фильтрует аудиты Lighthouse по категории производительности
+func filterPerformanceAudits(audits map[string]lighthouse.Audit) map[string]lighthouse.Audit {
+	perfAudits := make(map[string]lighthouse.Audit)
+
+	// Список аудитов, относящихся к производительности
+	perfAuditIDs := map[string]bool{
+		"first-contentful-paint":    true,
+		"largest-contentful-paint":  true,
+		"speed-index":               true,
+		"total-blocking-time":       true,
+		"interactive":               true,
+		"cumulative-layout-shift":   true,
+		"server-response-time":      true,
+		"render-blocking-resources": true,
+		"unminified-css":            true,
+		"unminified-javascript":     true,
+		"unused-css-rules":          true,
+		"unused-javascript":         true,
+		"uses-optimized-images":     true,
+		"uses-webp-images":          true,
+		"uses-text-compression":     true,
+		"uses-responsive-images":    true,
+		"efficiently-encode-images": true,
+		"dom-size":                  true,
+	}
+
+	for id, audit := range audits {
+		if perfAuditIDs[id] {
+			perfAudits[id] = audit
+		}
+	}
+
+	return perfAudits
 }
 
 // analyzeLargeImages проверяет наличие больших изображений

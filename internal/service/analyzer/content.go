@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"context"
 	"regexp"
 	"strings"
 	"unicode"
@@ -16,12 +17,19 @@ type ContentAnalyzer struct {
 // NewContentAnalyzer создает новый анализатор контента
 func NewContentAnalyzer() *ContentAnalyzer {
 	return &ContentAnalyzer{
-		BaseAnalyzer: NewBaseAnalyzer(),
+		BaseAnalyzer: NewBaseAnalyzer(ContentType),
 	}
 }
 
 // Analyze выполняет анализ контента
-func (a *ContentAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interface{}, error) {
+func (a *ContentAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteData, prevResults map[AnalyzerType]map[string]interface{}) (map[string]interface{}, error) {
+	// Проверка контекста
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	// Извлекаем чистый текст
 	text := data.TextContent
 
@@ -38,26 +46,61 @@ func (a *ContentAnalyzer) Analyze(data *parser.WebsiteData) (map[string]interfac
 
 	a.SetMetric("has_content", true)
 
-	// Анализ базовых метрик текста
+	// Проверяем, доступны ли результаты Lighthouse
+	lighthouseUsed := false
+
+	if lighthouseResults, ok := prevResults[LighthouseType]; ok {
+		// Определяем аудиты, связанные с контентом
+		contentAuditTypes := map[string]bool{
+			"document-title":   true,
+			"meta-description": true,
+			"link-text":        true,
+			"hreflang":         true,
+			"plugins":          true,
+			"canonical":        true,
+			"structured-data":  true,
+			"font-size":        true,
+			"heading-order":    true,
+		}
+
+		// Извлекаем данные аудитов контента
+		contentAudits := extractAuditsData(lighthouseResults, contentAuditTypes)
+
+		if len(contentAudits) > 0 {
+			a.SetMetric("lighthouse_content_audits", contentAudits)
+			lighthouseUsed = true
+
+			// Получаем проблемы из аудитов
+			contentIssues := getAuditIssues(contentAudits, 0.9)
+
+			// Добавляем проблемы и рекомендации
+			for _, issue := range contentIssues {
+				a.AddIssue(issue)
+				if description, ok := issue["details"].(string); ok {
+					a.AddRecommendation(description)
+				}
+			}
+		}
+	}
+
+	// Анализ базовых метрик текста (всегда проводим этот анализ)
 	a.analyzeBasicMetrics(text)
 
+	// Для более глубокого анализа, который не охватывается Lighthouse
 	// Анализ читаемости
 	a.analyzeReadability(text)
 
 	// Проверка плотности ключевых слов
 	a.analyzeKeywordDensity(text)
 
-	// Анализ длины заголовков
-	a.analyzeHeadingLength(data)
-
-	// Анализ структуры параграфов
-	a.analyzeParagraphStructure(data.HTML)
-
-	// Проверка на дупликаты контента
-	a.analyzeDuplicateContent(data.HTML)
-
-	// Анализ соотношения текста к HTML
-	a.analyzeTextToHtmlRatio(text, data.HTML)
+	// Дополнительные проверки, если у нас нет данных из Lighthouse
+	// или если мы хотим дополнить анализ Lighthouse своими проверками
+	if !lighthouseUsed {
+		a.analyzeHeadingLength(data)
+		a.analyzeParagraphStructure(data.HTML)
+		a.analyzeDuplicateContent(data.HTML)
+		a.analyzeTextToHtmlRatio(text, data.HTML)
+	}
 
 	// Расчет общей оценки
 	score := a.CalculateScore()

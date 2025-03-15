@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -106,51 +107,65 @@ func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 func (h *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 	// Обновляем статус анализа
 	if err := h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Update("status", "running").Error; err != nil {
+		h.updateAnalysisFailed(analysisID, "Ошибка обновления статуса: "+err.Error())
 		return
 	}
 
+	// Создаем контекст с таймаутом для всего анализа
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Duration(h.Config.AnalysisTimeout)*time.Second,
+	)
+	defer cancel()
+
 	// Парсим веб-сайт
-	websiteData, err := parser.ParseWebsite(url, parser.ParseOptions{Timeout: h.Config.AnalysisTimeout})
+	websiteData, err := parser.ParseWebsite(url, parser.ParseOptions{
+		Timeout: h.Config.AnalysisTimeout,
+	})
 	if err != nil {
-		h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
-			"status":       "failed",
-			"completed_at": time.Now(),
-			"metadata":     datatypes.JSON([]byte(`{"error": "` + err.Error() + `"}`)),
-		})
+		h.updateAnalysisFailed(analysisID, "Ошибка парсинга: "+err.Error())
 		return
 	}
 
 	// Обновляем информацию о веб-сайте
-	h.DB.Model(&models.Website{}).Where("url = ?", url).Updates(map[string]interface{}{
+	if err := h.DB.Model(&models.Website{}).Where("url = ?", url).Updates(map[string]interface{}{
 		"title":       websiteData.Title,
 		"description": websiteData.Description,
-	})
+	}).Error; err != nil {
+		h.updateAnalysisFailed(analysisID, "Ошибка обновления информации о сайте: "+err.Error())
+		return
+	}
 
 	// Создаем менеджер анализаторов
 	manager := analyzer.NewAnalyzerManager()
 	manager.RegisterAllAnalyzers()
 
-	// Запускаем все анализаторы
-	results, err := manager.RunAllAnalyzers(websiteData)
+	// Запускаем все анализаторы параллельно
+	results, err := manager.RunAllAnalyzers(ctx, websiteData)
 	if err != nil {
-		h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
-			"status":       "failed",
-			"completed_at": time.Now(),
-			"metadata":     datatypes.JSON([]byte(`{"error": "` + err.Error() + `"}`)),
-		})
+		h.updateAnalysisFailed(analysisID, "Ошибка анализа: "+err.Error())
 		return
 	}
 
 	// Сохраняем метрики в базу данных
 	for analyzerType, result := range results {
-		metricData, _ := json.Marshal(result)
+		metricData, err := json.Marshal(result)
+		if err != nil {
+			h.updateAnalysisFailed(analysisID, "Ошибка сериализации результатов: "+err.Error())
+			return
+		}
+
 		metric := models.AnalysisMetric{
 			AnalysisID: analysisID,
 			Category:   string(analyzerType),
 			Name:       string(analyzerType) + "_score",
 			Value:      datatypes.JSON(metricData),
 		}
-		h.DB.Create(&metric)
+
+		if err := h.DB.Create(&metric).Error; err != nil {
+			h.updateAnalysisFailed(analysisID, "Ошибка сохранения метрик: "+err.Error())
+			return
+		}
 	}
 
 	// Сохраняем проблемы
@@ -176,14 +191,25 @@ func (h *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 				issueRecord.Location = fmt.Sprintf("Count: %d", count)
 			}
 
-			h.DB.Create(&issueRecord)
+			if err := h.DB.Create(&issueRecord).Error; err != nil {
+				h.updateAnalysisFailed(analysisID, "Ошибка сохранения проблемы: "+err.Error())
+				return
+			}
 		}
 	}
 
-	// Сохраняем рекомендации
+	// Сохраняем рекомендации с удалением дубликатов
 	allRecommendations := manager.GetAllRecommendations()
+	uniqueRecommendations := make(map[string]struct{})
+
 	for analyzerType, recommendations := range allRecommendations {
 		for _, rec := range recommendations {
+			// Пропускаем рекомендации, которые уже были добавлены
+			if _, ok := uniqueRecommendations[rec]; ok {
+				continue
+			}
+			uniqueRecommendations[rec] = struct{}{}
+
 			priority := "medium" // Значение по умолчанию
 
 			// Определение приоритета на основе типа анализатора
@@ -205,14 +231,29 @@ func (h *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 				Description: rec,
 			}
 
-			h.DB.Create(&recommendation)
+			if err := h.DB.Create(&recommendation).Error; err != nil {
+				h.updateAnalysisFailed(analysisID, "Ошибка сохранения рекомендации: "+err.Error())
+				return
+			}
 		}
 	}
 
 	// Обновляем анализ как завершенный
-	h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
+	if err := h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
 		"status":       "completed",
 		"completed_at": time.Now(),
+	}).Error; err != nil {
+		h.updateAnalysisFailed(analysisID, "Ошибка обновления статуса завершения: "+err.Error())
+		return
+	}
+}
+
+// updateAnalysisFailed обновляет статус анализа на "failed"
+func (h *AnalysisHandler) updateAnalysisFailed(analysisID uuid.UUID, errorMsg string) {
+	h.DB.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(map[string]interface{}{
+		"status":       "failed",
+		"completed_at": time.Now(),
+		"metadata":     datatypes.JSON([]byte(`{"error": "` + errorMsg + `"}`)),
 	})
 }
 
