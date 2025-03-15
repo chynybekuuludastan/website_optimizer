@@ -23,8 +23,11 @@ type Config struct {
 	JWTExpiration time.Duration
 
 	// External APIs
-	OpenAIAPIKey  string
-	LighthouseURL string
+	OpenAIAPIKey         string
+	LighthouseURL        string
+	LighthouseAPIKey     string
+	LighthouseMobileMode bool
+	LighthouseTimeout    int
 
 	// Cache
 	CacheTTL time.Duration
@@ -57,8 +60,14 @@ func NewConfig() *Config {
 		JWTExpiration: time.Duration(jwtExpirationHours) * time.Hour,
 
 		// External APIs
-		OpenAIAPIKey:  getEnv("OPENAI_API_KEY", ""),
-		LighthouseURL: getEnv("LIGHTHOUSE_URL", "https://lighthouse-as-a-service.com/api/v1/audit"),
+		OpenAIAPIKey:     getEnv("OPENAI_API_KEY", ""),
+		LighthouseURL:    getEnv("LIGHTHOUSE_API_URL", "https://lighthouse-as-a-service.com/api/v1/audit"),
+		LighthouseAPIKey: getEnv("LIGHTHOUSE_API_KEY", "default-key"),
+		// LighthouseMobileMode: getEnv("LIGHTHOUSE_MOBILE_MODE", "false"),
+		LighthouseTimeout: func() int {
+			timeout, _ := strconv.Atoi(getEnv("LIGHTHOUSE_TIMEOUT", "60"))
+			return timeout
+		}(),
 
 		// Cache
 		CacheTTL: time.Duration(cacheTTLMin) * time.Minute,

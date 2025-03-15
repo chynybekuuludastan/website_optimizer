@@ -3,6 +3,7 @@ package analyzer
 import (
 	"fmt"
 
+	"github.com/chynybekuuludastan/website_optimizer/internal/config"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
 )
 
@@ -17,13 +18,14 @@ const (
 	SecurityType      AnalyzerType = "security"
 	MobileType        AnalyzerType = "mobile"
 	ContentType       AnalyzerType = "content"
+	LighthouseType    AnalyzerType = "lighthouse"
 )
 
 // AnalyzerFactory создает анализаторы заданного типа
 type AnalyzerFactory struct{}
 
 // CreateAnalyzer создает анализатор заданного типа
-func (f *AnalyzerFactory) CreateAnalyzer(analyzerType AnalyzerType) Analyzer {
+func (f *AnalyzerFactory) CreateAnalyzer(analyzerType AnalyzerType, config *config.Config) Analyzer {
 	switch analyzerType {
 	case SEOType:
 		return NewSEOAnalyzer()
@@ -39,6 +41,8 @@ func (f *AnalyzerFactory) CreateAnalyzer(analyzerType AnalyzerType) Analyzer {
 		return NewMobileAnalyzer()
 	case ContentType:
 		return NewContentAnalyzer()
+	case LighthouseType:
+		return NewLighthouseAnalyzer(config)
 	default:
 		return nil
 	}
@@ -63,15 +67,20 @@ func (m *AnalyzerManager) RegisterAnalyzer(analyzerType AnalyzerType, analyzer A
 
 // RegisterAllAnalyzers регистрирует все типы анализаторов
 func (m *AnalyzerManager) RegisterAllAnalyzers() {
+	config := config.NewConfig()
 	factory := &AnalyzerFactory{}
 
-	m.RegisterAnalyzer(SEOType, factory.CreateAnalyzer(SEOType))
-	m.RegisterAnalyzer(PerformanceType, factory.CreateAnalyzer(PerformanceType))
-	m.RegisterAnalyzer(StructureType, factory.CreateAnalyzer(StructureType))
-	m.RegisterAnalyzer(AccessibilityType, factory.CreateAnalyzer(AccessibilityType))
-	m.RegisterAnalyzer(SecurityType, factory.CreateAnalyzer(SecurityType))
-	m.RegisterAnalyzer(MobileType, factory.CreateAnalyzer(MobileType))
-	m.RegisterAnalyzer(ContentType, factory.CreateAnalyzer(ContentType))
+	m.RegisterAnalyzer(SEOType, factory.CreateAnalyzer(SEOType, config))
+	m.RegisterAnalyzer(PerformanceType, factory.CreateAnalyzer(PerformanceType, config))
+	m.RegisterAnalyzer(StructureType, factory.CreateAnalyzer(StructureType, config))
+	m.RegisterAnalyzer(AccessibilityType, factory.CreateAnalyzer(AccessibilityType, config))
+	m.RegisterAnalyzer(SecurityType, factory.CreateAnalyzer(SecurityType, config))
+	m.RegisterAnalyzer(MobileType, factory.CreateAnalyzer(MobileType, config))
+	m.RegisterAnalyzer(ContentType, factory.CreateAnalyzer(ContentType, config))
+
+	if config.LighthouseAPIKey != "" {
+		m.RegisterAnalyzer(LighthouseType, factory.CreateAnalyzer(LighthouseType, config))
+	}
 }
 
 // RunAnalyzer запускает конкретный анализатор
