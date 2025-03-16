@@ -10,6 +10,14 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
 )
 
+type ProgressUpdate struct {
+	AnalyzerType   string
+	Progress       float64
+	Message        string
+	Details        map[string]interface{}
+	PartialResults map[string]interface{}
+}
+
 // AnalyzerType определяет тип анализатора
 type AnalyzerType string
 
@@ -65,8 +73,9 @@ func (f *AnalyzerFactory) CreateAnalyzer(analyzerType AnalyzerType, config *conf
 
 // AnalyzerManager управляет процессом анализа
 type AnalyzerManager struct {
-	analyzers map[AnalyzerType]Analyzer
-	mu        sync.RWMutex // для потокобезопасного доступа
+	analyzers        map[AnalyzerType]Analyzer
+	mu               sync.RWMutex // для потокобезопасного доступа
+	progressCallback func(ProgressUpdate)
 }
 
 // NewAnalyzerManager создает новый менеджер анализа
@@ -269,4 +278,8 @@ func (m *AnalyzerManager) GetOverallScore() float64 {
 	}
 
 	return totalScore / float64(count)
+}
+
+func (m *AnalyzerManager) SetProgressCallback(callback func(ProgressUpdate)) {
+	m.progressCallback = callback
 }

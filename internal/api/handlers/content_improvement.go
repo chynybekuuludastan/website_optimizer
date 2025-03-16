@@ -3,13 +3,13 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 
 	"github.com/chynybekuuludastan/website_optimizer/internal/api/websocket"
+	ws "github.com/chynybekuuludastan/website_optimizer/internal/api/websocket"
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
 	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm"
@@ -208,18 +208,27 @@ func (h *ContentImprovementHandler) RequestContentImprovement(c *fiber.Ctx) erro
 	})
 }
 
-// generateAndSaveContentImprovements generates and saves content improvements
 func (h *ContentImprovementHandler) generateAndSaveContentImprovements(
 	analysisID uuid.UUID,
 	request *llm.ContentRequest,
 	providerName string,
 ) {
-	// Send WebSocket notification that generation started
-	h.WebSocketHub.BroadcastToAnalysis(analysisID, websocket.Message{
-		Type: "content_improvement_started",
-		Data: fiber.Map{
-			"analysis_id": analysisID,
-			"status":      "processing",
+	// Track start time for performance metrics
+	startTime := time.Now()
+
+	// Send WebSocket notification that generation started with enhanced message format
+	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
+		Type:      ws.TypeContentImprovementStarted,
+		Status:    "processing",
+		Progress:  0.0,
+		Category:  ws.CategoryContent,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"analysis_id":     analysisID.String(),
+			"provider":        providerName,
+			"target_audience": request.TargetAudience,
+			"language":        request.Language,
+			"message":         "Content improvement generation started",
 		},
 	})
 
@@ -227,34 +236,105 @@ func (h *ContentImprovementHandler) generateAndSaveContentImprovements(
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	// Send progress update - analysis results obtained
+	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
+		Type:      ws.TypeAnalysisProgress,
+		Status:    "processing",
+		Progress:  20.0,
+		Category:  ws.CategoryContent,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"stage":    "preparing_content",
+			"message":  "Processing analysis results for content improvement",
+			"progress": 20.0,
+		},
+	})
+
+	// Send progress update - sending to LLM
+	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
+		Type:      ws.TypeAnalysisProgress,
+		Status:    "processing",
+		Progress:  40.0,
+		Category:  ws.CategoryContent,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"stage":    "generating_content",
+			"message":  "Sending request to language model",
+			"progress": 40.0,
+			"provider": providerName,
+		},
+	})
+
 	// Generate content
 	response, err := h.LLMService.GenerateContent(ctx, request, providerName)
 	if err != nil {
-		// Log error
-		fmt.Printf("Error generating content improvement: %v\n", err)
-
-		// Send WebSocket notification of failure
-		h.WebSocketHub.BroadcastToAnalysis(analysisID, websocket.Message{
-			Type: "content_improvement_failed",
-			Data: fiber.Map{
-				"analysis_id": analysisID,
-				"status":      "failed",
+		// Log error and send failure notification
+		h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
+			Type:      ws.TypeContentImprovementFailed,
+			Status:    "failed",
+			Category:  ws.CategoryContent,
+			Timestamp: time.Now(),
+			Data: map[string]interface{}{
+				"analysis_id": analysisID.String(),
 				"error":       err.Error(),
+				"message":     "Failed to generate content improvement",
+				"duration_ms": time.Since(startTime).Milliseconds(),
 			},
 		})
 		return
 	}
 
+	// Send progress update - generating HTML
+	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
+		Type:      ws.TypeAnalysisProgress,
+		Status:    "processing",
+		Progress:  70.0,
+		Category:  ws.CategoryContent,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"stage":      "generating_html",
+			"message":    "Generating HTML from improved content",
+			"progress":   70.0,
+			"provider":   providerName,
+			"model_used": response.ProviderUsed,
+		},
+	})
+
 	// Generate HTML
 	html, err := h.LLMService.GenerateHTML(ctx, request, response, providerName)
 	if err != nil {
-		fmt.Printf("Error generating HTML: %v\n", err)
-		// Continue without HTML, it's optional
+		// Continue without HTML, send warning
+		h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
+			Type:      ws.TypeWarning,
+			Category:  ws.CategoryContent,
+			Timestamp: time.Now(),
+			Data: map[string]interface{}{
+				"analysis_id": analysisID.String(),
+				"warning":     "HTML generation failed but content was created",
+				"error":       err.Error(),
+				"stage":       "html_generation",
+			},
+		})
 	} else {
 		response.HTML = html
 	}
 
-	// Save content improvements to database
+	// Send progress update - saving to database
+	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
+		Type:      ws.TypeAnalysisProgress,
+		Status:    "processing",
+		Progress:  90.0,
+		Category:  ws.CategoryContent,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"stage":    "saving_improvements",
+			"message":  "Saving content improvements to database",
+			"progress": 90.0,
+			"has_html": html != "",
+		},
+	})
+
+	// Prepare database records
 	improvements := []models.ContentImprovement{
 		{
 			AnalysisID:      analysisID,
@@ -293,25 +373,45 @@ func (h *ContentImprovementHandler) generateAndSaveContentImprovements(
 	// Save all improvements
 	err = h.ContentImproveRepo.CreateBatch(improvements)
 	if err != nil {
-		fmt.Printf("Error saving content improvements: %v\n", err)
 		// Send notification of partial success
-		h.WebSocketHub.BroadcastToAnalysis(analysisID, websocket.Message{
-			Type: "content_improvement_partial",
-			Data: fiber.Map{
-				"analysis_id": analysisID,
-				"status":      "completed_with_errors",
+		h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
+			Type:      ws.TypeContentImprovementFailed,
+			Status:    "completed_with_errors",
+			Category:  ws.CategoryContent,
+			Timestamp: time.Now(),
+			Data: map[string]interface{}{
+				"analysis_id": analysisID.String(),
 				"error":       "Generated content couldn't be saved: " + err.Error(),
+				"message":     "Content was generated but couldn't be saved",
+				"content": map[string]interface{}{
+					"heading": response.Title,
+					"cta":     response.CTAText,
+					"content": response.Content[0:100] + "...", // Include preview
+				},
+				"duration_ms": time.Since(startTime).Milliseconds(),
 			},
 		})
 		return
 	}
 
-	// Send WebSocket notification that generation is complete
-	h.WebSocketHub.BroadcastToAnalysis(analysisID, websocket.Message{
-		Type: "content_improvement_completed",
-		Data: fiber.Map{
-			"analysis_id": analysisID,
-			"status":      "completed",
+	// Send WebSocket notification that generation is complete with detailed info
+	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
+		Type:      ws.TypeContentImprovementCompleted,
+		Status:    "completed",
+		Progress:  100.0,
+		Category:  ws.CategoryContent,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"analysis_id":   analysisID.String(),
+			"provider_used": response.ProviderUsed,
+			"cached":        response.CachedResult,
+			"has_html":      response.HTML != "",
+			"duration_ms":   time.Since(startTime).Milliseconds(),
+			"improvements": map[string]string{
+				"heading": response.Title,
+				"cta":     response.CTAText,
+				"content": response.Content,
+			},
 		},
 	})
 }
