@@ -15,6 +15,13 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// Logger interface for service logging
+type Logger interface {
+	Debug(msg string, keysAndValues ...interface{})
+	Info(msg string, keysAndValues ...interface{})
+	Error(msg string, keysAndValues ...interface{})
+}
+
 // Common errors
 var (
 	ErrAPIRequestFailed   = errors.New("LLM API request failed")
@@ -24,44 +31,7 @@ var (
 	ErrCacheMiss          = errors.New("cache miss")
 )
 
-// ContentRequest represents a request for content improvement
-type ContentRequest struct {
-	URL      string `json:"url"`                // The URL of the page to improve
-	Title    string `json:"title"`              // Current page title/heading
-	CTAText  string `json:"cta_text"`           // Current call-to-action text
-	Content  string `json:"content"`            // Current page content
-	Language string `json:"language,omitempty"` // Optional language for localized improvements
-}
-
-// ContentResponse represents the response with improved content
-type ContentResponse struct {
-	Title          string        `json:"heading"`                   // Improved heading
-	CTAText        string        `json:"cta_button"`                // Improved CTA button text
-	Content        string        `json:"improved_content"`          // Improved content
-	HTML           string        `json:"html,omitempty"`            // Optional HTML representation
-	ProviderUsed   string        `json:"provider_used,omitempty"`   // Provider that generated the content
-	CachedResult   bool          `json:"cached_result"`             // Whether this came from cache
-	ProcessingTime time.Duration `json:"processing_time,omitempty"` // How long it took to generate
-}
-
-// Provider defines the interface that all LLM providers must implement
-type Provider interface {
-	// GenerateContent generates improved content based on the request
-	GenerateContent(ctx context.Context, request *ContentRequest) (*ContentResponse, error)
-
-	// GenerateHTML generates HTML code for the improved content
-	GenerateHTML(ctx context.Context, original string, improved *ContentResponse) (string, error)
-
-	// GetName returns the name of the provider
-	GetName() string
-}
-
-// Logger interface for service logging
-type Logger interface {
-	Debug(msg string, keysAndValues ...interface{})
-	Info(msg string, keysAndValues ...interface{})
-	Error(msg string, keysAndValues ...interface{})
-}
+// Provider interface is in providers/provider.go
 
 // DefaultLogger provides a basic implementation of the Logger interface
 type DefaultLogger struct{}
@@ -87,8 +57,8 @@ type Service struct {
 	cacheTTL        time.Duration
 	maxRetries      int
 	retryDelay      time.Duration
-	logger          Logger
 	mutex           sync.RWMutex
+	logger          Logger
 }
 
 // ServiceOptions contains configuration for the LLM service
@@ -135,6 +105,21 @@ func NewService(opts ServiceOptions) *Service {
 		retryDelay:      opts.RetryDelay,
 		logger:          opts.Logger,
 	}
+}
+
+// Provider interface for LLM providers
+type Provider interface {
+	// GenerateContent generates improved content based on the request
+	GenerateContent(ctx context.Context, request *ContentRequest) (*ContentResponse, error)
+
+	// GenerateHTML generates HTML code for the improved content
+	GenerateHTML(ctx context.Context, original string, improved *ContentResponse) (string, error)
+
+	// GetName returns the name of the provider
+	GetName() string
+
+	// Close performs any necessary cleanup
+	Close() error
 }
 
 // RegisterProvider registers an LLM provider with the service
@@ -370,16 +355,17 @@ func (s *Service) GenerateHTML(ctx context.Context, request *ContentRequest,
 		}
 	}
 
+	// Update the response with the HTML
+	improved.HTML = html
+
 	// Log success
 	s.logger.Info("Generated HTML successfully", "provider", provider.GetName())
 
 	return html, nil
 }
 
-// Helper functions for processing LLM responses
-
-// extractContentFromText tries to extract content from non-JSON text
-func extractContentFromText(text string) (map[string]string, error) {
+// ExtractContentFromText tries to extract content from non-JSON text
+func ExtractContentFromText(text string) (map[string]string, error) {
 	result := make(map[string]string)
 
 	// Try to find heading
@@ -408,8 +394,8 @@ func extractContentFromText(text string) (map[string]string, error) {
 	return result, nil
 }
 
-// cleanCodeBlocks removes markdown code blocks from text
-func cleanCodeBlocks(text string) string {
+// CleanCodeBlocks removes markdown code blocks from text
+func CleanCodeBlocks(text string) string {
 	// Remove markdown code block markers
 	codeBlocksRegex := regexp.MustCompile("(?s)```(html)?(.+?)```")
 	if matches := codeBlocksRegex.FindStringSubmatch(text); len(matches) > 2 {
@@ -417,5 +403,5 @@ func cleanCodeBlocks(text string) string {
 	}
 
 	// If no code blocks found, return the original text
-	return text
+	return strings.TrimSpace(text)
 }

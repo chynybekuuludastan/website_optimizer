@@ -7,6 +7,15 @@ definitions:
     required:
     - url
     type: object
+  handlers.ContentImprovementRequest:
+    properties:
+      language:
+        type: string
+      provider:
+        type: string
+      target_audience:
+        type: string
+    type: object
   handlers.CreateWebsiteRequest:
     properties:
       description:
@@ -17,6 +26,15 @@ definitions:
         type: string
     required:
     - url
+    type: object
+  handlers.ErrorResponse:
+    properties:
+      error:
+        example: Something went wrong
+        type: string
+      success:
+        example: false
+        type: boolean
     type: object
   handlers.LoginRequest:
     properties:
@@ -43,6 +61,17 @@ definitions:
     - email
     - password
     - username
+    type: object
+  handlers.SuccessResponse:
+    properties:
+      data:
+        type: object
+      message:
+        example: Operation completed successfully
+        type: string
+      success:
+        example: true
+        type: boolean
     type: object
 host: localhost:8080
 info:
@@ -97,6 +126,132 @@ paths:
       summary: Create a new website analysis
       tags:
       - analysis
+  /analysis/{id}/content-html:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve generated HTML content for a specific analysis
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - text/html
+      responses:
+        "200":
+          description: HTML content
+          schema:
+            type: string
+        "400":
+          description: Invalid analysis ID
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: HTML content not found
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "500":
+          description: Server error
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get HTML content directly
+      tags:
+      - content-improvements
+  /analysis/{id}/content-improvements:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve all content improvements generated for a specific analysis
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Content improvements retrieved successfully
+          schema:
+            $ref: '#/definitions/handlers.SuccessResponse'
+        "400":
+          description: Invalid analysis ID
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Analysis not found
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "500":
+          description: Failed to fetch content improvements
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get content improvements for an analysis
+      tags:
+      - content-improvements
+    post:
+      consumes:
+      - application/json
+      description: Generate new content improvements using LLM for a specific analysis
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Content improvement request parameters
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.ContentImprovementRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Content improvement generation initiated
+          schema:
+            $ref: '#/definitions/handlers.SuccessResponse'
+        "400":
+          description: Invalid request
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Analysis not found
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "500":
+          description: Server error
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Request new content improvement
+      tags:
+      - content-improvements
   /analysis/{id}/score:
     get:
       consumes:

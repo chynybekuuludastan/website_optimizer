@@ -24,6 +24,7 @@ type Config struct {
 
 	// External APIs
 	OpenAIAPIKey         string
+	GeminiAPIKey         string
 	LighthouseURL        string
 	LighthouseAPIKey     string
 	LighthouseMobileMode bool
@@ -61,6 +62,7 @@ func NewConfig() *Config {
 
 		// External APIs
 		OpenAIAPIKey:     getEnv("OPENAI_API_KEY", ""),
+		GeminiAPIKey:     getEnv("GEMINI_API_KEY", ""),
 		LighthouseURL:    getEnv("LIGHTHOUSE_API_URL", "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"),
 		LighthouseAPIKey: getEnv("LIGHTHOUSE_API_KEY", "default-key"),
 		LighthouseTimeout: func() int {

@@ -1,0 +1,426 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+
+	"github.com/chynybekuuludastan/website_optimizer/internal/api/websocket"
+	"github.com/chynybekuuludastan/website_optimizer/internal/models"
+	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
+	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm"
+)
+
+// ContentImprovementHandler handles requests for content improvements
+type ContentImprovementHandler struct {
+	LLMService         *llm.Service
+	AnalysisRepo       repository.AnalysisRepository
+	MetricsRepo        repository.MetricsRepository
+	ContentImproveRepo repository.ContentImprovementRepository
+	WebsiteRepo        repository.WebsiteRepository
+	WebSocketHub       *websocket.Hub
+}
+
+// NewContentImprovementHandler creates a new content improvement handler
+func NewContentImprovementHandler(
+	llmService *llm.Service,
+	repoFactory *repository.Factory,
+	wsHub *websocket.Hub,
+) *ContentImprovementHandler {
+	return &ContentImprovementHandler{
+		LLMService:         llmService,
+		AnalysisRepo:       repoFactory.AnalysisRepository,
+		MetricsRepo:        repoFactory.MetricsRepository,
+		ContentImproveRepo: repoFactory.ContentImprovementRepository,
+		WebsiteRepo:        repoFactory.WebsiteRepository,
+		WebSocketHub:       wsHub,
+	}
+}
+
+// ContentImprovementRequest represents a request for content improvement
+type ContentImprovementRequest struct {
+	TargetAudience string `json:"target_audience"`
+	Language       string `json:"language"`
+	ProviderName   string `json:"provider"`
+}
+
+type SuccessResponse struct {
+	Success bool        `json:"success" example:"true"`
+	Message string      `json:"message,omitempty" example:"Operation completed successfully"`
+	Data    interface{} `json:"data,omitempty" swaggertype:"object"`
+}
+
+// ContentImprovementResponse represents the formatted content improvements response
+type ContentImprovementResponse struct {
+	Success bool                   `json:"success" example:"true"`
+	Data    ContentImprovementData `json:"data"`
+}
+
+// ContentImprovementData represents the data part of the content improvements response
+type ContentImprovementData struct {
+	Improvements map[string]string `json:"improvements" example:"{'heading':'Improved Heading','cta':'Click Now','content':'Better content text'}"`
+	Status       string            `json:"status" example:"completed"`
+	Model        string            `json:"model,omitempty" example:"gemini"`
+	CreatedAt    string            `json:"created_at,omitempty" example:"2025-03-16T12:00:00Z"`
+}
+
+// ErrorResponse represents a standard error response
+type ErrorResponse struct {
+	Success bool   `json:"success" example:"false"`
+	Error   string `json:"error" example:"Something went wrong"`
+}
+
+// @Summary Request new content improvement
+// @Description Generate new content improvements using LLM for a specific analysis
+// @Tags content-improvements
+// @Accept json
+// @Produce json
+// @Param id path string true "Analysis ID" format="uuid"
+// @Param request body handlers.ContentImprovementRequest true "Content improvement request parameters"
+// @Success 202 {object} handlers.SuccessResponse "Content improvement generation initiated"
+// @Failure 400 {object} handlers.ErrorResponse "Invalid request"
+// @Failure 401 {object} handlers.ErrorResponse "Unauthorized"
+// @Failure 403 {object} handlers.ErrorResponse "Forbidden"
+// @Failure 404 {object} handlers.ErrorResponse "Analysis not found"
+// @Failure 500 {object} handlers.ErrorResponse "Server error"
+// @Security BearerAuth
+// @Router /analysis/{id}/content-improvements [post]
+func (h *ContentImprovementHandler) RequestContentImprovement(c *fiber.Ctx) error {
+	// Get analysis ID from path
+	id := c.Params("id")
+	analysisID, err := uuid.Parse(id)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid analysis ID",
+		})
+	}
+
+	// Parse request body
+	req := new(ContentImprovementRequest)
+	if err := c.BodyParser(req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid request body: " + err.Error(),
+		})
+	}
+
+	// Check if analysis exists
+	var analysis models.Analysis
+	if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "Analysis not found",
+		})
+	}
+
+	// Check if analysis is completed
+	if analysis.Status != "completed" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Analysis is not completed yet",
+			"status":  analysis.Status,
+		})
+	}
+
+	// Get website data
+	var website models.Website
+	if err := h.WebsiteRepo.FindByID(analysis.WebsiteID, &website); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch website data",
+		})
+	}
+
+	// Get metrics data for analysis results
+	metrics, err := h.MetricsRepo.FindByAnalysisID(analysisID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch analysis metrics",
+		})
+	}
+
+	// Extract text content from website or analysis metadata
+	title := website.Title
+	content := ""
+	ctaText := "Learn More" // Default CTA text
+
+	// Extract more details from analysis metadata if available
+	if analysis.Metadata != nil {
+		var metadata map[string]interface{}
+		if err := json.Unmarshal(analysis.Metadata, &metadata); err == nil {
+			if t, ok := metadata["page_title"].(string); ok && t != "" {
+				title = t
+			}
+			if c, ok := metadata["page_content"].(string); ok && c != "" {
+				content = c
+			}
+			if cta, ok := metadata["cta_text"].(string); ok && cta != "" {
+				ctaText = cta
+			}
+		}
+	}
+
+	// Use website description if content is still empty
+	if content == "" {
+		content = website.Description
+	}
+
+	// Check for minimum required content
+	if title == "" {
+		title = "Untitled Page"
+	}
+	if content == "" {
+		content = "No content available for analysis."
+	}
+
+	// Extract analysis results
+	analysisResults := llm.ExtractAnalysisResults(metrics)
+
+	// Create a ContentRequest
+	contentRequest := &llm.ContentRequest{
+		URL:             website.URL,
+		Title:           title,
+		CTAText:         ctaText,
+		Content:         content,
+		AnalysisResults: analysisResults,
+		Language:        req.Language,
+		TargetAudience:  req.TargetAudience,
+	}
+
+	// Start content generation in the background
+	go func() {
+		h.generateAndSaveContentImprovements(analysisID, contentRequest, req.ProviderName)
+	}()
+
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"success": true,
+		"message": "Content improvement generation started",
+		"data": fiber.Map{
+			"analysis_id": analysisID,
+			"status":      "processing",
+		},
+	})
+}
+
+// generateAndSaveContentImprovements generates and saves content improvements
+func (h *ContentImprovementHandler) generateAndSaveContentImprovements(
+	analysisID uuid.UUID,
+	request *llm.ContentRequest,
+	providerName string,
+) {
+	// Send WebSocket notification that generation started
+	h.WebSocketHub.BroadcastToAnalysis(analysisID, websocket.Message{
+		Type: "content_improvement_started",
+		Data: fiber.Map{
+			"analysis_id": analysisID,
+			"status":      "processing",
+		},
+	})
+
+	// Set timeout for generation
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Generate content
+	response, err := h.LLMService.GenerateContent(ctx, request, providerName)
+	if err != nil {
+		// Log error
+		fmt.Printf("Error generating content improvement: %v\n", err)
+
+		// Send WebSocket notification of failure
+		h.WebSocketHub.BroadcastToAnalysis(analysisID, websocket.Message{
+			Type: "content_improvement_failed",
+			Data: fiber.Map{
+				"analysis_id": analysisID,
+				"status":      "failed",
+				"error":       err.Error(),
+			},
+		})
+		return
+	}
+
+	// Generate HTML
+	html, err := h.LLMService.GenerateHTML(ctx, request, response, providerName)
+	if err != nil {
+		fmt.Printf("Error generating HTML: %v\n", err)
+		// Continue without HTML, it's optional
+	} else {
+		response.HTML = html
+	}
+
+	// Save content improvements to database
+	improvements := []models.ContentImprovement{
+		{
+			AnalysisID:      analysisID,
+			ElementType:     "heading",
+			OriginalContent: request.Title,
+			ImprovedContent: response.Title,
+			LLMModel:        response.ProviderUsed,
+		},
+		{
+			AnalysisID:      analysisID,
+			ElementType:     "cta",
+			OriginalContent: request.CTAText,
+			ImprovedContent: response.CTAText,
+			LLMModel:        response.ProviderUsed,
+		},
+		{
+			AnalysisID:      analysisID,
+			ElementType:     "content",
+			OriginalContent: request.Content,
+			ImprovedContent: response.Content,
+			LLMModel:        response.ProviderUsed,
+		},
+	}
+
+	// Add HTML as a separate improvement if available
+	if response.HTML != "" {
+		improvements = append(improvements, models.ContentImprovement{
+			AnalysisID:      analysisID,
+			ElementType:     "html",
+			OriginalContent: "",
+			ImprovedContent: response.HTML,
+			LLMModel:        response.ProviderUsed,
+		})
+	}
+
+	// Save all improvements
+	err = h.ContentImproveRepo.CreateBatch(improvements)
+	if err != nil {
+		fmt.Printf("Error saving content improvements: %v\n", err)
+		// Send notification of partial success
+		h.WebSocketHub.BroadcastToAnalysis(analysisID, websocket.Message{
+			Type: "content_improvement_partial",
+			Data: fiber.Map{
+				"analysis_id": analysisID,
+				"status":      "completed_with_errors",
+				"error":       "Generated content couldn't be saved: " + err.Error(),
+			},
+		})
+		return
+	}
+
+	// Send WebSocket notification that generation is complete
+	h.WebSocketHub.BroadcastToAnalysis(analysisID, websocket.Message{
+		Type: "content_improvement_completed",
+		Data: fiber.Map{
+			"analysis_id": analysisID,
+			"status":      "completed",
+		},
+	})
+}
+
+// @Summary Get content improvements for an analysis
+// @Description Retrieve all content improvements generated for a specific analysis
+// @Tags content-improvements
+// @Accept json
+// @Produce json
+// @Param id path string true "Analysis ID" format="uuid"
+// @Success 200 {object} handlers.SuccessResponse "Content improvements retrieved successfully"
+// @Failure 400 {object} handlers.ErrorResponse "Invalid analysis ID"
+// @Failure 401 {object} handlers.ErrorResponse "Unauthorized"
+// @Failure 404 {object} handlers.ErrorResponse "Analysis not found"
+// @Failure 500 {object} handlers.ErrorResponse "Failed to fetch content improvements"
+// @Security BearerAuth
+// @Router /analysis/{id}/content-improvements [get]
+func (h *ContentImprovementHandler) GetContentImprovements(c *fiber.Ctx) error {
+	// Get analysis ID from path
+	id := c.Params("id")
+	analysisID, err := uuid.Parse(id)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid analysis ID",
+		})
+	}
+
+	// Get content improvements for this analysis
+	improvements, err := h.ContentImproveRepo.FindByAnalysisID(analysisID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch content improvements",
+		})
+	}
+
+	// If no improvements found, check if analysis exists
+	if len(improvements) == 0 {
+		var analysis models.Analysis
+		if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"success": false,
+				"error":   "Analysis not found",
+			})
+		}
+
+		// Analysis exists but no improvements yet
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data": fiber.Map{
+				"improvements": []interface{}{},
+				"status":       "not_generated",
+			},
+		})
+	}
+
+	// Format response by element type
+	response := map[string]string{}
+	for _, improvement := range improvements {
+		response[improvement.ElementType] = improvement.ImprovedContent
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"improvements": response,
+			"status":       "completed",
+			"model":        improvements[0].LLMModel,
+			"created_at":   improvements[0].CreatedAt,
+		},
+	})
+}
+
+// @Summary Get HTML content directly
+// @Description Retrieve generated HTML content for a specific analysis
+// @Tags content-improvements
+// @Accept json
+// @Produce html
+// @Param id path string true "Analysis ID" format="uuid"
+// @Success 200 {string} string "HTML content"
+// @Failure 400 {object} handlers.ErrorResponse "Invalid analysis ID"
+// @Failure 401 {object} handlers.ErrorResponse "Unauthorized"
+// @Failure 404 {object} handlers.ErrorResponse "HTML content not found"
+// @Failure 500 {object} handlers.ErrorResponse "Server error"
+// @Security BearerAuth
+// @Router /analysis/{id}/content-html [get]
+func (h *ContentImprovementHandler) GetContentHTML(c *fiber.Ctx) error {
+	// Get analysis ID from path
+	id := c.Params("id")
+	analysisID, err := uuid.Parse(id)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid analysis ID",
+		})
+	}
+
+	// Find HTML improvement
+	improvements, err := h.ContentImproveRepo.FindByElementType(analysisID, "html")
+	if err != nil || len(improvements) == 0 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "HTML content not found",
+		})
+	}
+
+	// Return HTML content directly
+	return c.Status(fiber.StatusOK).
+		Type("html").
+		SendString(improvements[0].ImprovedContent)
+}

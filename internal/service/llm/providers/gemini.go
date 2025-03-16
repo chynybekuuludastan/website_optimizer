@@ -1,13 +1,14 @@
-package llm
+package providers
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm"
+	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm/prompts"
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
 )
@@ -17,22 +18,23 @@ type GeminiProvider struct {
 	apiKey    string
 	modelName string
 	client    *genai.Client
-	logger    Logger
+	logger    llm.Logger
+	generator *prompts.Generator
 }
 
 // NewGeminiProvider creates a new Gemini provider using the official client
-func NewGeminiProvider(apiKey string, modelName string, logger Logger) (*GeminiProvider, error) {
+func NewGeminiProvider(apiKey string, modelName string, logger llm.Logger) (*GeminiProvider, error) {
 	// Проверка параметров
 	if apiKey == "" || apiKey == "YOUR_GEMINI_API_KEY" {
 		return nil, errors.New("требуется действительный API ключ Gemini")
 	}
 
 	if modelName == "" {
-		modelName = "gemini-2.0-flash" // Default model
+		modelName = "gemini-1.5-flash" // Default model
 	}
 
 	if logger == nil {
-		logger = &DefaultLogger{}
+		logger = &llm.DefaultLogger{}
 	}
 
 	// Initialize the Gemini client
@@ -55,6 +57,7 @@ func NewGeminiProvider(apiKey string, modelName string, logger Logger) (*GeminiP
 		modelName: modelName,
 		client:    client,
 		logger:    logger,
+		generator: prompts.NewGenerator(),
 	}, nil
 }
 
@@ -64,7 +67,7 @@ func (p *GeminiProvider) GetName() string {
 }
 
 // GenerateContent implements the Provider interface
-func (p *GeminiProvider) GenerateContent(ctx context.Context, request *ContentRequest) (*ContentResponse, error) {
+func (p *GeminiProvider) GenerateContent(ctx context.Context, request *llm.ContentRequest) (*llm.ContentResponse, error) {
 	startTime := time.Now()
 
 	// Get the model
@@ -76,18 +79,8 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, request *ContentRe
 	model.SetTopK(40)
 	model.SetMaxOutputTokens(2048)
 
-	// Create prompt for content improvement
-	prompt := fmt.Sprintf(`
-You are an expert in web content optimization.
-
-Based on the analysis of the website %s, suggest improved versions of headings, CTA buttons, and text content to increase conversion rates. Consider the current content:
-- Heading: "%s"
-- CTA: "%s"
-- Text: "%s"
-
-Response format: JSON with fields 'heading', 'cta_button', 'improved_content'.
-Do not include any explanations, just return the JSON object.
-`, request.URL, request.Title, request.CTAText, request.Content)
+	// Generate prompt for content improvement
+	prompt := p.generator.GenerateContentPrompt(request)
 
 	p.logger.Debug("Sending prompt to Gemini", "prompt", prompt)
 
@@ -149,7 +142,7 @@ Do not include any explanations, just return the JSON object.
 			"content", responseText)
 
 		// Try to extract content using regex as fallback
-		parsed, extractErr := extractContentFromText(responseText)
+		parsed, extractErr := llm.ExtractContentFromText(responseText)
 		if extractErr != nil {
 			return nil, fmt.Errorf("ошибка разбора ответа: %w, оригинальная ошибка: %w", extractErr, err)
 		}
@@ -164,7 +157,7 @@ Do not include any explanations, just return the JSON object.
 	}
 
 	// Create the response
-	contentResponse := &ContentResponse{
+	contentResponse := &llm.ContentResponse{
 		Title:          improvements["heading"],
 		CTAText:        improvements["cta_button"],
 		Content:        improvements["improved_content"],
@@ -176,7 +169,7 @@ Do not include any explanations, just return the JSON object.
 }
 
 // GenerateHTML implements the Provider interface
-func (p *GeminiProvider) GenerateHTML(ctx context.Context, originalContent string, improved *ContentResponse) (string, error) {
+func (p *GeminiProvider) GenerateHTML(ctx context.Context, originalContent string, improved *llm.ContentResponse) (string, error) {
 	// Get the model
 	model := p.client.GenerativeModel(p.modelName)
 
@@ -184,38 +177,8 @@ func (p *GeminiProvider) GenerateHTML(ctx context.Context, originalContent strin
 	model.SetTemperature(0.2)
 	model.SetMaxOutputTokens(2048)
 
-	// Make sure we have valid data to work with
-	if improved.Title == "" {
-		improved.Title = "Заголовок"
-	}
-	if improved.CTAText == "" {
-		improved.CTAText = "Кнопка"
-	}
-	if improved.Content == "" {
-		improved.Content = originalContent
-	}
-
-	// Format the JSON for improvements
-	improvementsJSON, _ := json.Marshal(map[string]string{
-		"heading":          improved.Title,
-		"cta_button":       improved.CTAText,
-		"improved_content": improved.Content,
-	})
-
-	// Create prompt for HTML generation
-	prompt := fmt.Sprintf(`
-You are an expert HTML developer. Create clean, semantic HTML code.
-
-Based on the original content and the suggested improvements, create an updated HTML code.
-
-Original content:
-%s
-
-Suggested improvements (JSON):
-%s
-
-Return only the HTML code without any explanations or markdown formatting. Do not include backticks or 'html' language tags.
-`, originalContent, string(improvementsJSON))
+	// Generate prompt for HTML generation
+	prompt := p.generator.GenerateHTMLPrompt(originalContent, improved)
 
 	p.logger.Debug("Sending HTML prompt to Gemini", "prompt", prompt)
 
@@ -242,10 +205,10 @@ Return only the HTML code without any explanations or markdown formatting. Do no
 	p.logger.Debug("Received HTML from Gemini", "html", html)
 
 	// Remove any markdown code blocks
-	html = cleanCodeBlocks(html)
+	html = llm.CleanCodeBlocks(html)
 
 	// If the HTML is empty, generate a basic version
-	if html == "" || strings.TrimSpace(html) == "" {
+	if html == "" {
 		html = fmt.Sprintf("<h1>%s</h1>\n<p>%s</p>\n<button>%s</button>",
 			improved.Title, improved.Content, improved.CTAText)
 	}

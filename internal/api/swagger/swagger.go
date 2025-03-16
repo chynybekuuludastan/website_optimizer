@@ -1,4 +1,4 @@
-package api
+package swagger
 
 import (
 	"github.com/gofiber/fiber/v2"

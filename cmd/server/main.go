@@ -1,4 +1,3 @@
-// cmd/server/main.go
 package main
 
 import (
@@ -14,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/chynybekuuludastan/website_optimizer/internal/api"
+	"github.com/chynybekuuludastan/website_optimizer/internal/api/swagger"
 	"github.com/chynybekuuludastan/website_optimizer/internal/config"
 	"github.com/chynybekuuludastan/website_optimizer/internal/database"
 )
@@ -84,7 +84,7 @@ func main() {
 	}))
 
 	// Setup Swagger
-	api.SetupSwagger(app)
+	swagger.SetupSwagger(app)
 
 	// Setup routes
 	api.SetupRoutes(app, db, redisClient, cfg)

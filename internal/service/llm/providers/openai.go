@@ -1,4 +1,4 @@
-package llm
+package providers
 
 import (
 	"bytes"
@@ -9,6 +9,9 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm"
+	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm/prompts"
 )
 
 const (
@@ -21,7 +24,8 @@ type OpenAIProvider struct {
 	apiKey     string
 	model      string
 	httpClient *http.Client
-	logger     Logger
+	logger     llm.Logger
+	generator  *prompts.Generator
 }
 
 // OpenAIMessage represents a message in the OpenAI chat API
@@ -59,13 +63,17 @@ type OpenAIResponse struct {
 }
 
 // NewOpenAIProvider creates a new OpenAI provider
-func NewOpenAIProvider(apiKey string, model string, logger Logger) *OpenAIProvider {
+func NewOpenAIProvider(apiKey string, model string, logger llm.Logger) (*OpenAIProvider, error) {
+	if apiKey == "" {
+		return nil, errors.New("OpenAI API key is required")
+	}
+
 	if model == "" {
 		model = "gpt-4" // Default model
 	}
 
 	if logger == nil {
-		logger = &DefaultLogger{}
+		logger = &llm.DefaultLogger{}
 	}
 
 	return &OpenAIProvider{
@@ -73,7 +81,8 @@ func NewOpenAIProvider(apiKey string, model string, logger Logger) *OpenAIProvid
 		model:      model,
 		httpClient: &http.Client{Timeout: defaultTimeout},
 		logger:     logger,
-	}
+		generator:  prompts.NewGenerator(),
+	}, nil
 }
 
 // GetName returns the provider name
@@ -82,8 +91,9 @@ func (p *OpenAIProvider) GetName() string {
 }
 
 // GenerateContent implements the Provider interface
-func (p *OpenAIProvider) GenerateContent(ctx context.Context, request *ContentRequest) (*ContentResponse, error) {
-	prompt := p.buildContentPrompt(request)
+func (p *OpenAIProvider) GenerateContent(ctx context.Context, request *llm.ContentRequest) (*llm.ContentResponse, error) {
+	// Generate prompt
+	prompt := p.generator.GenerateContentPrompt(request)
 
 	messages := []OpenAIMessage{
 		{
@@ -121,23 +131,25 @@ func (p *OpenAIProvider) GenerateContent(ctx context.Context, request *ContentRe
 			"content", responseContent)
 
 		// Try to extract content using regex as fallback
-		parsed, extractErr := extractContentFromText(responseContent)
+		parsed, extractErr := llm.ExtractContentFromText(responseContent)
 		if extractErr != nil {
 			return nil, fmt.Errorf("failed to parse response: %w", err)
 		}
 		improvements = parsed
 	}
 
-	return &ContentResponse{
-		Title:   improvements["heading"],
-		CTAText: improvements["cta_button"],
-		Content: improvements["improved_content"],
+	return &llm.ContentResponse{
+		Title:        improvements["heading"],
+		CTAText:      improvements["cta_button"],
+		Content:      improvements["improved_content"],
+		ProviderUsed: p.GetName(),
 	}, nil
 }
 
 // GenerateHTML implements the Provider interface
-func (p *OpenAIProvider) GenerateHTML(ctx context.Context, originalContent string, improved *ContentResponse) (string, error) {
-	prompt := p.buildHTMLPrompt(originalContent, improved)
+func (p *OpenAIProvider) GenerateHTML(ctx context.Context, originalContent string, improved *llm.ContentResponse) (string, error) {
+	// Generate prompt for HTML
+	prompt := p.generator.GenerateHTMLPrompt(originalContent, improved)
 
 	messages := []OpenAIMessage{
 		{
@@ -168,7 +180,7 @@ func (p *OpenAIProvider) GenerateHTML(ctx context.Context, originalContent strin
 	html := apiResponse.Choices[0].Message.Content
 
 	// Remove markdown code blocks if present
-	html = cleanCodeBlocks(html)
+	html = llm.CleanCodeBlocks(html)
 
 	return html, nil
 }
@@ -214,36 +226,8 @@ func (p *OpenAIProvider) makeRequest(ctx context.Context, request OpenAIRequest)
 	return &apiResponse, nil
 }
 
-// buildContentPrompt creates a prompt for content improvement
-func (p *OpenAIProvider) buildContentPrompt(request *ContentRequest) string {
-	return fmt.Sprintf(`
-На основе анализа сайта %s, предложите улучшенные версии заголовков, CTA-кнопок и текстового
-контента для повышения конверсии. Учитывайте текущий контент:
-- заголовок: "%s"
-- CTA: "%s"
-- текст: "%s"
-
-Формат ответа: JSON с полями 'heading', 'cta_button', 'improved_content'.
-`, request.URL, request.Title, request.CTAText, request.Content)
-}
-
-// buildHTMLPrompt creates a prompt for HTML generation
-func (p *OpenAIProvider) buildHTMLPrompt(originalContent string, improved *ContentResponse) string {
-	improvementsJSON, _ := json.Marshal(map[string]string{
-		"heading":          improved.Title,
-		"cta_button":       improved.CTAText,
-		"improved_content": improved.Content,
-	})
-
-	return fmt.Sprintf(`
-На основе оригинального контента и предложенных улучшений, создайте обновленный HTML-код.
-
-Оригинальный контент:
-%s
-
-Предложенные улучшения (JSON):
-%s
-
-Верните только HTML-код без объяснений.
-`, originalContent, string(improvementsJSON))
+// Close implements the Provider interface
+func (p *OpenAIProvider) Close() error {
+	// Nothing to close for HTTP client
+	return nil
 }

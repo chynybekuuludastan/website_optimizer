@@ -1,4 +1,4 @@
-package api
+package swagger
 
 // This file contains model definitions for Swagger documentation
 

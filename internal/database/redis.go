@@ -10,7 +10,7 @@ import (
 
 // RedisClient wraps the Redis client
 type RedisClient struct {
-	client *redis.Client
+	Client *redis.Client // Changed from client to Client (capitalized for public access)
 	ctx    context.Context
 }
 
@@ -30,14 +30,14 @@ func InitRedis(redisURI string) (*RedisClient, error) {
 	}
 
 	return &RedisClient{
-		client: client,
+		Client: client, // Changed from client to Client
 		ctx:    ctx,
 	}, nil
 }
 
 // Close closes the Redis connection
 func (r *RedisClient) Close() error {
-	return r.client.Close()
+	return r.Client.Close() // Changed from client to Client
 }
 
 // Set stores a key-value pair in Redis with expiration
@@ -46,12 +46,12 @@ func (r *RedisClient) Set(key string, value interface{}, expiration time.Duratio
 	if err != nil {
 		return err
 	}
-	return r.client.Set(r.ctx, key, data, expiration).Err()
+	return r.Client.Set(r.ctx, key, data, expiration).Err() // Changed from client to Client
 }
 
 // Get retrieves a value from Redis
 func (r *RedisClient) Get(key string, dest interface{}) error {
-	data, err := r.client.Get(r.ctx, key).Result()
+	data, err := r.Client.Get(r.ctx, key).Result() // Changed from client to Client
 	if err != nil {
 		return err
 	}
@@ -60,7 +60,7 @@ func (r *RedisClient) Get(key string, dest interface{}) error {
 
 // Delete removes a key from Redis
 func (r *RedisClient) Delete(key string) error {
-	return r.client.Del(r.ctx, key).Err()
+	return r.Client.Del(r.ctx, key).Err() // Changed from client to Client
 }
 
 // GetCached gets a value from cache or calls the provider function to generate it

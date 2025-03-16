@@ -1,20 +1,49 @@
 package api
 
 import (
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/websocket/v2"
+	"time"
 
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/swagger"
+	"github.com/gofiber/websocket/v2"
+	"golang.org/x/time/rate"
+
+	_ "github.com/chynybekuuludastan/website_optimizer/docs" // Import generated Swagger docs
 	"github.com/chynybekuuludastan/website_optimizer/internal/api/handlers"
 	"github.com/chynybekuuludastan/website_optimizer/internal/api/middleware"
+	ws "github.com/chynybekuuludastan/website_optimizer/internal/api/websocket"
 	"github.com/chynybekuuludastan/website_optimizer/internal/config"
 	"github.com/chynybekuuludastan/website_optimizer/internal/database"
 	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
+	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm"
+	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm/providers"
 )
+
+// @title Website Optimizer API
+// @version 1.0
+// @description API for website analysis and content improvement using LLM
+// @termsOfService http://swagger.io/terms/
+// @contact.name API Support
+// @contact.url https://website-optimizer.com/support
+// @contact.email support@website-optimizer.com
+// @license.name Apache 2.0
+// @license.url http://www.apache.org/licenses/LICENSE-2.0.html
+// @host localhost:8080
+// @BasePath /api
+// @schemes http https
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+// @description Type "Bearer" followed by a space and JWT token
 
 // SetupRoutes configures all API routes
 func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *database.RedisClient, cfg *config.Config) {
 	// Initialize repository factory
 	repoFactory := repository.NewRepositoryFactory(db.DB)
+
+	// Initialize WebSocket hub
+	hub := ws.NewHub()
+	go hub.Run()
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(repoFactory.UserRepository, redisClient, cfg)
@@ -26,6 +55,9 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 		cfg,
 	)
 	analysisHandler := handlers.NewAnalysisHandler(repoFactory, redisClient, cfg)
+
+	// WebSocket handler for analysis updates
+	wsHandler := handlers.NewWebSocketHandler(hub, repoFactory.AnalysisRepository)
 
 	// API group
 	api := app.Group("/api")
@@ -64,12 +96,13 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 	analysis := api.Group("/analysis")
 	analysis.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.CreateAnalysis)
 
-	// Только реализованные методы
+	// Protected analysis routes
 	protectedAnalysis := analysis.Group("/:id", middleware.JWTMiddleware(cfg))
-
-	// Новые маршруты для анализаторов (только существующие методы)
 	protectedAnalysis.Get("/score", analysisHandler.GetOverallScore)
 	protectedAnalysis.Get("/summary/:category", analysisHandler.GetCategorySummary)
+
+	// Setup LLM related routes
+	setupLLMRoutes(api, repoFactory, redisClient, hub, cfg)
 
 	// WebSocket endpoint for real-time analysis updates
 	app.Use("/ws", func(c *fiber.Ctx) error {
@@ -79,5 +112,47 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 		return c.SendStatus(fiber.StatusUpgradeRequired)
 	})
 
-	app.Get("/ws/analysis/:id", websocket.New(analysisHandler.HandleWebSocket))
+	app.Get("/ws/analysis/:id", websocket.New(wsHandler.HandleAnalysisWebSocket))
+
+	// Set up Swagger documentation endpoint
+	app.Get("/swagger/*", swagger.HandlerDefault)
+}
+
+func setupLLMRoutes(apiGroup fiber.Router, repoFactory *repository.Factory, redisClient *database.RedisClient, hub *ws.Hub, cfg *config.Config) {
+	// Initialize LLM service with the internal redis.Client
+	llmService := llm.NewService(llm.ServiceOptions{
+		DefaultProvider: "gemini",           // Set default provider
+		RedisClient:     redisClient.Client, // Now correctly accessing the internal redis.Client
+		RateLimit:       rate.Limit(5),      // 5 requests per second
+		RateBurst:       2,
+		CacheTTL:        24 * time.Hour,
+		MaxRetries:      3,
+		RetryDelay:      time.Second,
+	})
+
+	// Register providers
+	if cfg.OpenAIAPIKey != "" {
+		openaiProvider, err := providers.NewOpenAIProvider(cfg.OpenAIAPIKey, "gpt-4", nil)
+		if err == nil {
+			llmService.RegisterProvider(openaiProvider)
+		}
+	}
+
+	// Create Gemini provider if config exists
+	geminiProvider, err := providers.NewGeminiProvider(cfg.GeminiAPIKey, "gemini-2.0-flash", nil)
+	if err == nil {
+		llmService.RegisterProvider(geminiProvider)
+	}
+
+	// Initialize content improvement handler
+	contentHandler := handlers.NewContentImprovementHandler(llmService, repoFactory, hub)
+
+	// Set up routes for content improvements with Swagger annotations
+	contentRoutes := apiGroup.Group("/analysis/:id/content-improvements")
+
+	contentRoutes.Get("/", middleware.JWTMiddleware(cfg), contentHandler.GetContentImprovements)
+
+	contentRoutes.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), contentHandler.RequestContentImprovement)
+
+	apiGroup.Get("/analysis/:id/content-html", middleware.JWTMiddleware(cfg), contentHandler.GetContentHTML)
 }
