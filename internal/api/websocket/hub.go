@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
 	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
 )
@@ -148,6 +149,7 @@ type Hub struct {
 
 	// Control handlers
 	controlHandlers map[MessageType]func(*ControlRequest) interface{}
+	userRepo        repository.UserRepository
 }
 
 // BroadcastMessage represents a message to be broadcast
@@ -158,7 +160,7 @@ type BroadcastMessage struct {
 }
 
 // NewHub creates a new hub
-func NewHub() *Hub {
+func NewHub(userRepo repository.UserRepository) *Hub {
 	return &Hub{
 		clients:             make(map[uuid.UUID]map[*Client]bool),
 		rooms:               make(map[string]map[*Client]bool),
@@ -176,6 +178,7 @@ func NewHub() *Hub {
 		controlHandlers:     make(map[MessageType]func(*ControlRequest) interface{}),
 		bufferSize:          100,
 		pingInterval:        30 * time.Second,
+		userRepo:            userRepo,
 	}
 }
 
@@ -229,6 +232,8 @@ func (h *Hub) registerClient(client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	log.Printf("Registering client for analysis ID: %s", client.analysisID)
+
 	// Initialize client in all clients map
 	h.allClients[client] = true
 
@@ -237,6 +242,10 @@ func (h *Hub) registerClient(client *Client) {
 		h.clients[client.analysisID] = make(map[*Client]bool)
 	}
 	h.clients[client.analysisID][client] = true
+
+	if client.send == nil {
+		client.send = make(chan []byte, 256)
+	}
 
 	// Send connection established message
 	connMsg := Message{
@@ -478,7 +487,7 @@ func (h *Hub) handleControlRequest(req *ControlRequest) {
 func (h *Hub) sendToAnalysisClients(broadcast *BroadcastMessage) {
 	analysisID, ok := broadcast.TargetID.(uuid.UUID)
 	if !ok {
-		log.Printf("Invalid analysis ID type: %T", broadcast.TargetID)
+		log.Printf("Invalid analysis ID type: %T - %v", broadcast.TargetID, broadcast.TargetID)
 		return
 	}
 
@@ -490,12 +499,17 @@ func (h *Hub) sendToAnalysisClients(broadcast *BroadcastMessage) {
 		broadcast.Message.SequenceID = h.nextSequence()
 	}
 
+	// Логирование для отладки
+	log.Printf("Broadcasting message type %s to analysis %s", broadcast.Message.Type, analysisID)
+
 	h.mu.RLock()
 	clients, exists := h.clients[analysisID]
+	clientCount := len(clients)
 	h.mu.RUnlock()
 
 	// If no clients are connected, buffer the message
-	if !exists || len(clients) == 0 {
+	if !exists || clientCount == 0 {
+		log.Printf("No clients connected for analysis %s, buffering message", analysisID)
 		h.bufferAnalysisMessage(analysisID, broadcast.Message)
 		return
 	}
@@ -507,53 +521,29 @@ func (h *Hub) sendToAnalysisClients(broadcast *BroadcastMessage) {
 		return
 	}
 
+	log.Printf("Sending message to %d clients for analysis %s", clientCount, analysisID)
+
 	// Send to all clients for this analysis
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
 	for client := range clients {
-		// If acknowledgment is required, store in pending acks
-		if broadcast.RequireAck {
-			client.pendingAcks[broadcast.Message.RequestID] = broadcast.Message
-
-			// Schedule cleanup in case acknowledgment never arrives
-			go func(c *Client, reqID string) {
-				select {
-				case <-time.After(c.ackTimeout):
-					// Remove from pending if still there
-					if _, exists := c.pendingAcks[reqID]; exists {
-						delete(c.pendingAcks, reqID)
-
-						// Send timeout notification
-						timeoutMsg := Message{
-							Type:       TypeWarning,
-							Status:     "ack_timeout",
-							Timestamp:  time.Now(),
-							SequenceID: h.nextSequence(),
-							Data: map[string]interface{}{
-								"request_id": reqID,
-								"message":    "Acknowledgment timeout",
-							},
-						}
-
-						msgJSON, _ := json.Marshal(timeoutMsg)
-						select {
-						case c.send <- msgJSON:
-						default:
-							// Channel is full or closed
-						}
-					}
-				case <-c.closeSignal:
-					// Client is closing, no need to clean up
-					return
-				}
-			}(client, broadcast.Message.RequestID)
+		// Проверка на nil и closed канал
+		if client == nil || client.isClosed {
+			continue
 		}
 
 		// Try to send the message
 		select {
 		case client.send <- msgJSON:
 			// Message sent successfully
+			log.Printf("Message sent to client successfully")
 		default:
 			// Channel is full or closed, unregister the client
-			h.unregister <- client
+			log.Printf("Failed to send message to client, unregistering")
+			go func(c *Client) {
+				h.unregister <- c
+			}(client)
 		}
 	}
 }
@@ -743,6 +733,28 @@ func (h *Hub) BroadcastToAll(message Message) {
 
 // HandleConnection manages a WebSocket connection
 func (h *Hub) HandleConnection(conn *websocket.Conn, analysisID uuid.UUID) {
+	// Добавляем лог для отладки
+	log.Printf("New WebSocket connection for analysis ID: %s", analysisID.String())
+
+	// Получение userID из контекста, защита от nil
+	var userID uuid.UUID
+	var username string = "anonymous"
+
+	if userIDRaw := conn.Locals("userID"); userIDRaw != nil {
+		if id, ok := userIDRaw.(uuid.UUID); ok {
+			userID = id
+			// Создаем простое имя пользователя на основе ID
+			if userID != uuid.Nil {
+				username = fmt.Sprintf("user-%s", userID.String()[:8])
+			}
+		}
+	}
+
+	// Установка базовых прав доступа
+	permissions := map[string]bool{
+		"view": true,
+	}
+
 	client := &Client{
 		conn:         conn,
 		analysisID:   analysisID,
@@ -752,6 +764,9 @@ func (h *Hub) HandleConnection(conn *websocket.Conn, analysisID uuid.UUID) {
 		pendingAcks:  make(map[string]Message),
 		receivedAcks: make(map[string]bool),
 		ackTimeout:   30 * time.Second,
+		userID:       userID,
+		username:     username,
+		permissions:  permissions,
 		closeSignal:  make(chan struct{}),
 		hub:          h,
 	}
@@ -783,32 +798,52 @@ func (c *Client) writePump() {
 		ticker.Stop()
 		c.conn.Close()
 		close(c.closeSignal)
+		c.isClosed = true
 	}()
 
 	for {
 		select {
 		case message, ok := <-c.send:
 			c.writeMutex.Lock()
+
+			// Проверка на закрытый соединение
+			if c.isClosed {
+				c.writeMutex.Unlock()
+				return
+			}
+
 			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if !ok {
 				// The hub closed the channel
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				c.writeMutex.Unlock()
+				c.isClosed = true
 				return
 			}
 
 			// Write the message
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				log.Printf("Error writing message to WebSocket: %v", err)
 				c.writeMutex.Unlock()
+				c.isClosed = true
 				return
 			}
 			c.writeMutex.Unlock()
 
 		case <-ticker.C:
 			c.writeMutex.Lock()
+
+			// Проверка на закрытый соединение
+			if c.isClosed {
+				c.writeMutex.Unlock()
+				return
+			}
+
 			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Printf("Error writing ping to WebSocket: %v", err)
 				c.writeMutex.Unlock()
+				c.isClosed = true
 				return
 			}
 			c.writeMutex.Unlock()

@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	ws "github.com/chynybekuuludastan/website_optimizer/internal/api/websocket"
+	"github.com/chynybekuuludastan/website_optimizer/internal/config"
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
 	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
 )
@@ -19,14 +20,16 @@ type WebSocketHandler struct {
 	Hub          *ws.Hub
 	AnalysisRepo repository.AnalysisRepository
 	UserRepo     repository.UserRepository
+	Config       *config.Config
 }
 
 // NewWebSocketHandler creates a new WebSocket handler
-func NewWebSocketHandler(hub *ws.Hub, analysisRepo repository.AnalysisRepository, userRepo repository.UserRepository) *WebSocketHandler {
+func NewWebSocketHandler(hub *ws.Hub, analysisRepo repository.AnalysisRepository, userRepo repository.UserRepository, cfg *config.Config) *WebSocketHandler {
 	return &WebSocketHandler{
 		Hub:          hub,
 		AnalysisRepo: analysisRepo,
 		UserRepo:     userRepo,
+		Config:       cfg,
 	}
 }
 

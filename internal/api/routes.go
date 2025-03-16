@@ -41,8 +41,7 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 	repoFactory := repository.NewRepositoryFactory(db.DB)
 
 	// Initialize WebSocket hub
-	// Initialize WebSocket hub
-	hub := ws.NewHub()
+	hub := ws.NewHub(repoFactory.UserRepository)
 	go hub.Run()
 
 	// Initialize handlers
@@ -55,7 +54,7 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 		cfg,
 	)
 	analysisHandler := handlers.NewAnalysisHandler(repoFactory, redisClient, cfg, hub)
-	wsHandler := handlers.NewWebSocketHandler(hub, repoFactory.AnalysisRepository, repoFactory.UserRepository)
+	wsHandler := handlers.NewWebSocketHandler(hub, repoFactory.AnalysisRepository, repoFactory.UserRepository, cfg)
 
 	// Serve static files
 	app.Get("/ws-test", wsHandler.ServePage)
