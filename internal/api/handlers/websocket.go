@@ -390,16 +390,7 @@ func (h *WebSocketHandler) HandleGroupRoom(c *websocket.Conn) {
 	go client.StartReadPump()
 }
 
-// WebSocketTestHandler handles requests for the WebSocket test page
-type WebSocketTestHandler struct{}
-
-// NewWebSocketTestHandler creates a new WebSocket test handler
-func NewWebSocketTestHandler() *WebSocketTestHandler {
-	return &WebSocketTestHandler{}
-}
-
-// ServePage serves the WebSocket testing interface
-func (h *WebSocketTestHandler) ServePage(c *fiber.Ctx) error {
+func (h *WebSocketHandler) ServePage(c *fiber.Ctx) error {
 	// Serve the WebSocket test HTML page
 	return c.SendFile("./static/websocket-test.html")
 }

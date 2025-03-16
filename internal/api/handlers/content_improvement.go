@@ -8,7 +8,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 
-	"github.com/chynybekuuludastan/website_optimizer/internal/api/websocket"
 	ws "github.com/chynybekuuludastan/website_optimizer/internal/api/websocket"
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
 	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
@@ -22,14 +21,14 @@ type ContentImprovementHandler struct {
 	MetricsRepo        repository.MetricsRepository
 	ContentImproveRepo repository.ContentImprovementRepository
 	WebsiteRepo        repository.WebsiteRepository
-	WebSocketHub       *websocket.Hub
+	WebSocketHub       *ws.Hub
 }
 
 // NewContentImprovementHandler creates a new content improvement handler
 func NewContentImprovementHandler(
 	llmService *llm.Service,
 	repoFactory *repository.Factory,
-	wsHub *websocket.Hub,
+	wsHub *ws.Hub,
 ) *ContentImprovementHandler {
 	return &ContentImprovementHandler{
 		LLMService:         llmService,

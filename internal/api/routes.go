@@ -41,6 +41,7 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 	repoFactory := repository.NewRepositoryFactory(db.DB)
 
 	// Initialize WebSocket hub
+	// Initialize WebSocket hub
 	hub := ws.NewHub()
 	go hub.Run()
 
@@ -53,12 +54,11 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 		redisClient,
 		cfg,
 	)
-	analysisHandler := handlers.NewAnalysisHandler(repoFactory, redisClient, cfg, ws.NewHub())
-
-	// WebSocket handler for analysis updates
+	analysisHandler := handlers.NewAnalysisHandler(repoFactory, redisClient, cfg, hub)
 	wsHandler := handlers.NewWebSocketHandler(hub, repoFactory.AnalysisRepository, repoFactory.UserRepository)
-	wsTestHandler := handlers.NewWebSocketTestHandler()
-	app.Get("/ws-test", wsTestHandler.ServePage)
+
+	// Serve static files
+	app.Get("/ws-test", wsHandler.ServePage)
 	app.Static("/static", "./static")
 
 	// API group
@@ -95,19 +95,11 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 	websites.Delete("/:id", middleware.AnalystOrAdmin(), websiteHandler.DeleteWebsite)
 
 	// Analysis routes
-	// analysis := api.Group("/analysis")
-	// analysis.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.CreateAnalysis)
-
-	// // Protected analysis routes
-	// protectedAnalysis := analysis.Group("/:id", middleware.JWTMiddleware(cfg))
-	// protectedAnalysis.Get("/score", analysisHandler.GetOverallScore)
-	// protectedAnalysis.Get("/summary/:category", analysisHandler.GetCategorySummary)
 	analysis := api.Group("/analysis")
-	// Removing middleware.JWTMiddleware(cfg) and middleware.AnalystOrAdmin() for testing
-	analysis.Post("/", analysisHandler.CreateAnalysis)
+	analysis.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.CreateAnalysis)
 
-	// For the protected routes, also remove the JWT middleware
-	protectedAnalysis := analysis.Group("/:id")
+	// Protected analysis routes
+	protectedAnalysis := analysis.Group("/:id", middleware.JWTMiddleware(cfg))
 	protectedAnalysis.Get("/score", analysisHandler.GetOverallScore)
 	protectedAnalysis.Get("/summary/:category", analysisHandler.GetCategorySummary)
 
