@@ -34,3 +34,4 @@ Thumbs.db
 
 # Конфигурационные файлы
 .env
+results/
