@@ -29,9 +29,9 @@ var (
 	ErrResponseProcessing = errors.New("failed to process LLM response")
 	ErrInvalidProvider    = errors.New("invalid LLM provider specified")
 	ErrCacheMiss          = errors.New("cache miss")
+	ErrTimeout            = errors.New("request timed out")
+	ErrCancelled          = errors.New("request was cancelled")
 )
-
-// Provider interface is in providers/provider.go
 
 // DefaultLogger provides a basic implementation of the Logger interface
 type DefaultLogger struct{}
@@ -48,6 +48,9 @@ func (l *DefaultLogger) Error(msg string, keysAndValues ...interface{}) {
 	log.Printf("[ERROR] %s %v", msg, keysAndValues)
 }
 
+// ProgressCallback is a function that receives generation progress updates
+type ProgressCallback func(progress float64, message string)
+
 // Service handles LLM API interactions with caching and rate limiting
 type Service struct {
 	providers       map[string]Provider
@@ -59,6 +62,7 @@ type Service struct {
 	retryDelay      time.Duration
 	mutex           sync.RWMutex
 	logger          Logger
+	defaultTimeout  time.Duration
 }
 
 // ServiceOptions contains configuration for the LLM service
@@ -71,6 +75,7 @@ type ServiceOptions struct {
 	MaxRetries      int
 	RetryDelay      time.Duration
 	Logger          Logger
+	DefaultTimeout  time.Duration
 }
 
 // NewService creates a new LLM service with the specified options
@@ -94,6 +99,9 @@ func NewService(opts ServiceOptions) *Service {
 	if opts.Logger == nil {
 		opts.Logger = &DefaultLogger{}
 	}
+	if opts.DefaultTimeout == 0 {
+		opts.DefaultTimeout = 30 * time.Second
+	}
 
 	return &Service{
 		providers:       make(map[string]Provider),
@@ -104,6 +112,7 @@ func NewService(opts ServiceOptions) *Service {
 		maxRetries:      opts.MaxRetries,
 		retryDelay:      opts.RetryDelay,
 		logger:          opts.Logger,
+		defaultTimeout:  opts.DefaultTimeout,
 	}
 }
 
@@ -111,6 +120,9 @@ func NewService(opts ServiceOptions) *Service {
 type Provider interface {
 	// GenerateContent generates improved content based on the request
 	GenerateContent(ctx context.Context, request *ContentRequest) (*ContentResponse, error)
+
+	// GenerateContentWithProgress generates content with progress updates
+	GenerateContentWithProgress(ctx context.Context, request *ContentRequest, progressCb ProgressCallback) (*ContentResponse, error)
 
 	// GenerateHTML generates HTML code for the improved content
 	GenerateHTML(ctx context.Context, original string, improved *ContentResponse) (string, error)
@@ -156,7 +168,19 @@ func (s *Service) GetProvider(name string) (Provider, error) {
 
 // generateCacheKey creates a cache key from the request
 func (s *Service) generateCacheKey(request *ContentRequest, operation string) string {
-	return fmt.Sprintf("llm:%s:%s:%s", operation, request.URL, request.Language)
+	// Add language to the cache key if specified
+	langPart := ""
+	if request.Language != "" && request.Language != "en" {
+		langPart = ":" + request.Language
+	}
+
+	// Add target audience to the cache key if specified
+	audiencePart := ""
+	if request.TargetAudience != "" {
+		audiencePart = ":" + request.TargetAudience
+	}
+
+	return fmt.Sprintf("llm:%s:%s%s%s", operation, request.URL, langPart, audiencePart)
 }
 
 // getFromCache retrieves a response from Redis cache
@@ -196,6 +220,13 @@ func (s *Service) saveToCache(ctx context.Context, key string, response *Content
 // GenerateContent generates improved content with caching, rate limiting and retries
 func (s *Service) GenerateContent(ctx context.Context, request *ContentRequest, providerName string) (*ContentResponse, error) {
 	startTime := time.Now()
+
+	// Apply timeout if not already set
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancel = context.WithTimeout(ctx, s.defaultTimeout)
+		defer cancel()
+	}
 
 	// Try to get from cache first
 	cacheKey := s.generateCacheKey(request, "content")
@@ -243,7 +274,14 @@ func (s *Service) GenerateContent(ctx context.Context, request *ContentRequest, 
 			case <-time.After(s.retryDelay * time.Duration(1<<uint(retry-1))):
 				// Continue after delay
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				switch ctx.Err() {
+				case context.Canceled:
+					return nil, ErrCancelled
+				case context.DeadlineExceeded:
+					return nil, ErrTimeout
+				default:
+					return nil, ctx.Err()
+				}
 			}
 		}
 
@@ -251,6 +289,13 @@ func (s *Service) GenerateContent(ctx context.Context, request *ContentRequest, 
 		response, lastErr = provider.GenerateContent(ctx, request)
 		if lastErr == nil {
 			break
+		}
+
+		// Check if we should continue retrying
+		if errors.Is(lastErr, context.Canceled) {
+			return nil, ErrCancelled
+		} else if errors.Is(lastErr, context.DeadlineExceeded) {
+			return nil, ErrTimeout
 		}
 
 		// Log error
@@ -285,9 +330,106 @@ func (s *Service) GenerateContent(ctx context.Context, request *ContentRequest, 
 	return response, nil
 }
 
+// GenerateContentWithProgress generates content with progress updates
+func (s *Service) GenerateContentWithProgress(ctx context.Context, request *ContentRequest,
+	providerName string, progressCb ProgressCallback) (*ContentResponse, error) {
+	startTime := time.Now()
+
+	// Apply timeout if not already set
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancel = context.WithTimeout(ctx, s.defaultTimeout)
+		defer cancel()
+	}
+
+	// Try to get from cache first
+	cacheKey := s.generateCacheKey(request, "content")
+	if s.redisClient != nil {
+		cachedResponse, err := s.getFromCache(ctx, cacheKey)
+		if err == nil {
+			// Cache hit
+			cachedResponse.CachedResult = true
+			cachedResponse.ProcessingTime = time.Since(startTime)
+
+			// Report 100% progress for cached responses
+			if progressCb != nil {
+				progressCb(100, "Retrieved from cache")
+			}
+
+			s.logger.Debug("Cache hit for content generation with progress",
+				"url", request.URL,
+				"provider", cachedResponse.ProviderUsed)
+
+			return cachedResponse, nil
+		}
+
+		// Report cache miss
+		if progressCb != nil {
+			progressCb(0, "Cache miss, generating new content")
+		}
+	}
+
+	// Apply rate limiting
+	if err := s.limiter.Wait(ctx); err != nil {
+		s.logger.Error("Rate limit exceeded", "error", err)
+		return nil, ErrRateLimitExceeded
+	}
+
+	// Get provider
+	provider, err := s.GetProvider(providerName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate content with progress
+	response, err := provider.GenerateContentWithProgress(ctx, request, progressCb)
+	if err != nil {
+		// Check for specific errors
+		if errors.Is(err, context.Canceled) {
+			return nil, ErrCancelled
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			return nil, ErrTimeout
+		}
+
+		return nil, fmt.Errorf("%w: %v", ErrAPIRequestFailed, err)
+	}
+
+	// Set metadata
+	response.ProviderUsed = provider.GetName()
+	response.ProcessingTime = time.Since(startTime)
+	response.CachedResult = false
+
+	// Cache the result
+	if s.redisClient != nil {
+		if err := s.saveToCache(ctx, cacheKey, response); err != nil {
+			s.logger.Error("Failed to cache LLM response", "error", err)
+		}
+	}
+
+	// Report 100% progress
+	if progressCb != nil {
+		progressCb(100, "Content generation completed")
+	}
+
+	// Log success
+	s.logger.Info("Generated content with progress successfully",
+		"provider", provider.GetName(),
+		"url", request.URL,
+		"time", response.ProcessingTime)
+
+	return response, nil
+}
+
 // GenerateHTML generates HTML for improved content with caching and retries
 func (s *Service) GenerateHTML(ctx context.Context, request *ContentRequest,
 	improved *ContentResponse, providerName string) (string, error) {
+
+	// Apply timeout if not already set
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancel = context.WithTimeout(ctx, s.defaultTimeout)
+		defer cancel()
+	}
 
 	// Try to get from cache first
 	cacheKey := s.generateCacheKey(request, "html")
@@ -327,7 +469,14 @@ func (s *Service) GenerateHTML(ctx context.Context, request *ContentRequest,
 			case <-time.After(s.retryDelay * time.Duration(1<<uint(retry-1))):
 				// Continue after delay
 			case <-ctx.Done():
-				return "", ctx.Err()
+				switch ctx.Err() {
+				case context.Canceled:
+					return "", ErrCancelled
+				case context.DeadlineExceeded:
+					return "", ErrTimeout
+				default:
+					return "", ctx.Err()
+				}
 			}
 		}
 
@@ -335,6 +484,13 @@ func (s *Service) GenerateHTML(ctx context.Context, request *ContentRequest,
 		html, lastErr = provider.GenerateHTML(ctx, request.Content, improved)
 		if lastErr == nil {
 			break
+		}
+
+		// Check if we should continue retrying
+		if errors.Is(lastErr, context.Canceled) {
+			return "", ErrCancelled
+		} else if errors.Is(lastErr, context.DeadlineExceeded) {
+			return "", ErrTimeout
 		}
 
 		// Log error
@@ -404,4 +560,36 @@ func CleanCodeBlocks(text string) string {
 
 	// If no code blocks found, return the original text
 	return strings.TrimSpace(text)
+}
+
+// GetAvailableProviders returns a list of available provider names
+func (s *Service) GetAvailableProviders() []string {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	providers := make([]string, 0, len(s.providers))
+	for name := range s.providers {
+		providers = append(providers, name)
+	}
+
+	return providers
+}
+
+// Close closes all providers
+func (s *Service) Close() error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	var errs []string
+	for name, provider := range s.providers {
+		if err := provider.Close(); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors closing providers: %s", strings.Join(errs, "; "))
+	}
+
+	return nil
 }

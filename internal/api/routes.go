@@ -119,28 +119,30 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 	app.Get("/swagger/*", swagger.HandlerDefault)
 }
 
+// Setup LLM related routes
 func setupLLMRoutes(apiGroup fiber.Router, repoFactory *repository.Factory, redisClient *database.RedisClient, hub *ws.Hub, cfg *config.Config) {
 	// Initialize LLM service with the internal redis.Client
 	llmService := llm.NewService(llm.ServiceOptions{
-		DefaultProvider: "gemini",           // Set default provider
-		RedisClient:     redisClient.Client, // Now correctly accessing the internal redis.Client
-		RateLimit:       rate.Limit(5),      // 5 requests per second
+		DefaultProvider: "gemini",
+		RedisClient:     redisClient.Client,
+		RateLimit:       rate.Limit(5), // 5 requests per second
 		RateBurst:       2,
 		CacheTTL:        24 * time.Hour,
 		MaxRetries:      3,
 		RetryDelay:      time.Second,
+		DefaultTimeout:  2 * time.Minute, // Set a reasonable timeout
 	})
 
 	// Register providers
-	if cfg.OpenAIAPIKey != "" {
-		openaiProvider, err := providers.NewOpenAIProvider(cfg.OpenAIAPIKey, "gpt-4", nil)
-		if err == nil {
-			llmService.RegisterProvider(openaiProvider)
-		}
-	}
+	// if cfg.OpenAIAPIKey != "" {
+	// 	openaiProvider, err := providers.NewOpenAIProvider(cfg.OpenAIAPIKey, "gpt-4", nil)
+	// 	if err == nil {
+	// 		llmService.RegisterProvider(openaiProvider)
+	// 	}
+	// }
 
 	// Create Gemini provider if config exists
-	geminiProvider, err := providers.NewGeminiProvider(cfg.GeminiAPIKey, "gemini-2.0-flash", nil)
+	geminiProvider, err := providers.NewGeminiProvider(cfg.GeminiAPIKey, "gemini-1.5-flash", nil)
 	if err == nil {
 		llmService.RegisterProvider(geminiProvider)
 	}
@@ -148,12 +150,23 @@ func setupLLMRoutes(apiGroup fiber.Router, repoFactory *repository.Factory, redi
 	// Initialize content improvement handler
 	contentHandler := handlers.NewContentImprovementHandler(llmService, repoFactory, hub)
 
-	// Set up routes for content improvements with Swagger annotations
+	// Set up routes for content improvements
 	contentRoutes := apiGroup.Group("/analysis/:id/content-improvements")
-
 	contentRoutes.Get("/", middleware.JWTMiddleware(cfg), contentHandler.GetContentImprovements)
-
 	contentRoutes.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), contentHandler.RequestContentImprovement)
+	contentRoutes.Post("/cancel", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), contentHandler.CancelContentGeneration)
 
+	// HTML content route
 	apiGroup.Get("/analysis/:id/content-html", middleware.JWTMiddleware(cfg), contentHandler.GetContentHTML)
+
+	// LLM providers info route - useful for the frontend
+	apiGroup.Get("/llm/providers", middleware.JWTMiddleware(cfg), func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data": fiber.Map{
+				"providers": llmService.GetAvailableProviders(),
+				"default":   cfg.DefaultLLMProvider,
+			},
+		})
+	})
 }

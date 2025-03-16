@@ -24,9 +24,9 @@ type GeminiProvider struct {
 
 // NewGeminiProvider creates a new Gemini provider using the official client
 func NewGeminiProvider(apiKey string, modelName string, logger llm.Logger) (*GeminiProvider, error) {
-	// Проверка параметров
+	// Validate parameters
 	if apiKey == "" || apiKey == "YOUR_GEMINI_API_KEY" {
-		return nil, errors.New("требуется действительный API ключ Gemini")
+		return nil, errors.New("valid Gemini API key required")
 	}
 
 	if modelName == "" {
@@ -41,15 +41,15 @@ func NewGeminiProvider(apiKey string, modelName string, logger llm.Logger) (*Gem
 	ctx := context.Background()
 	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
 	if err != nil {
-		return nil, fmt.Errorf("ошибка создания клиента Gemini: %w", err)
+		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
 	}
 
-	// Проверка валидности API ключа с простым запросом
+	// Validate API key with a simple request
 	model := client.GenerativeModel("gemini-1.5-flash")
 	_, err = model.GenerateContent(ctx, genai.Text("Test"))
 	if err != nil {
 		client.Close()
-		return nil, fmt.Errorf("ошибка доступа к API Gemini: %w", err)
+		return nil, fmt.Errorf("failed to access Gemini API: %w", err)
 	}
 
 	return &GeminiProvider{
@@ -84,7 +84,7 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, request *llm.Conte
 
 	p.logger.Debug("Sending prompt to Gemini", "prompt", prompt)
 
-	// Определение параметров безопасности
+	// Define safety settings
 	safetySettings := []*genai.SafetySetting{
 		{
 			Category:  genai.HarmCategoryHarassment,
@@ -104,24 +104,24 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, request *llm.Conte
 		},
 	}
 
-	// Применяем настройки безопасности
+	// Apply safety settings
 	model.SafetySettings = safetySettings
 
 	// Generate content using the official client
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
 		p.logger.Error("Gemini API error", "error", err)
-		return nil, fmt.Errorf("ошибка Gemini API: %w", err)
+		return nil, fmt.Errorf("gemini API error: %w", err)
 	}
 
 	// Process the response
 	if len(resp.Candidates) == 0 {
-		return nil, errors.New("контент не сгенерирован")
+		return nil, errors.New("no content generated")
 	}
 
 	// Check for safety issues
 	if resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != genai.BlockReasonUnspecified {
-		return nil, fmt.Errorf("контент заблокирован по причине: %s", resp.PromptFeedback.BlockReason)
+		return nil, fmt.Errorf("content blocked due to: %s", resp.PromptFeedback.BlockReason)
 	}
 
 	// Extract text from response
@@ -144,7 +144,7 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, request *llm.Conte
 		// Try to extract content using regex as fallback
 		parsed, extractErr := llm.ExtractContentFromText(responseText)
 		if extractErr != nil {
-			return nil, fmt.Errorf("ошибка разбора ответа: %w, оригинальная ошибка: %w", extractErr, err)
+			return nil, fmt.Errorf("error parsing response: %w, original error: %w", extractErr, err)
 		}
 
 		p.logger.Info("Extracted content using regex", "parsed", parsed)
@@ -168,6 +168,116 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, request *llm.Conte
 	return contentResponse, nil
 }
 
+// GenerateContentWithProgress implements the Provider interface with progress tracking
+func (p *GeminiProvider) GenerateContentWithProgress(ctx context.Context, request *llm.ContentRequest,
+	progressCb llm.ProgressCallback) (*llm.ContentResponse, error) {
+
+	// Report initial progress
+	if progressCb != nil {
+		progressCb(10, "Initializing Gemini model")
+	}
+
+	// Get the model
+	model := p.client.GenerativeModel(p.modelName)
+
+	// Configure the model settings
+	model.SetTemperature(0.7)
+	model.SetTopP(0.95)
+	model.SetTopK(40)
+	model.SetMaxOutputTokens(2048)
+
+	// Generate prompt
+	if progressCb != nil {
+		progressCb(20, "Generating prompt")
+	}
+
+	prompt := p.generator.GenerateContentPrompt(request)
+
+	// Set safety settings
+	safetySettings := []*genai.SafetySetting{
+		{
+			Category:  genai.HarmCategoryHarassment,
+			Threshold: genai.HarmBlockNone,
+		},
+		{
+			Category:  genai.HarmCategoryHateSpeech,
+			Threshold: genai.HarmBlockNone,
+		},
+		{
+			Category:  genai.HarmCategorySexuallyExplicit,
+			Threshold: genai.HarmBlockNone,
+		},
+		{
+			Category:  genai.HarmCategoryDangerousContent,
+			Threshold: genai.HarmBlockNone,
+		},
+	}
+	model.SafetySettings = safetySettings
+
+	// Report sending to API
+	if progressCb != nil {
+		progressCb(30, "Sending request to Gemini API")
+	}
+
+	// Generate content
+	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	if err != nil {
+		return nil, fmt.Errorf("gemini API error: %w", err)
+	}
+
+	// Process response
+	if progressCb != nil {
+		progressCb(70, "Processing response")
+	}
+
+	// Check for errors
+	if len(resp.Candidates) == 0 {
+		return nil, errors.New("no content generated")
+	}
+
+	// Check for safety issues
+	if resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != genai.BlockReasonUnspecified {
+		return nil, fmt.Errorf("content blocked due to: %s", resp.PromptFeedback.BlockReason)
+	}
+
+	// Extract text
+	var responseText string
+	for _, part := range resp.Candidates[0].Content.Parts {
+		if textPart, ok := part.(genai.Text); ok {
+			responseText += string(textPart)
+		}
+	}
+
+	// Parse response
+	if progressCb != nil {
+		progressCb(80, "Parsing results")
+	}
+
+	var improvements map[string]string
+	if err := json.Unmarshal([]byte(responseText), &improvements); err != nil {
+		// Use regex extraction as fallback
+		parsed, extractErr := llm.ExtractContentFromText(responseText)
+		if extractErr != nil {
+			return nil, fmt.Errorf("error parsing response: %w", err)
+		}
+		improvements = parsed
+	}
+
+	// Create response object
+	if progressCb != nil {
+		progressCb(90, "Finalizing content response")
+	}
+
+	contentResponse := &llm.ContentResponse{
+		Title:        improvements["heading"],
+		CTAText:      improvements["cta_button"],
+		Content:      improvements["improved_content"],
+		ProviderUsed: "gemini",
+	}
+
+	return contentResponse, nil
+}
+
 // GenerateHTML implements the Provider interface
 func (p *GeminiProvider) GenerateHTML(ctx context.Context, originalContent string, improved *llm.ContentResponse) (string, error) {
 	// Get the model
@@ -186,12 +296,12 @@ func (p *GeminiProvider) GenerateHTML(ctx context.Context, originalContent strin
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
 		p.logger.Error("Gemini HTML generation error", "error", err)
-		return "", fmt.Errorf("ошибка генерации HTML через Gemini: %w", err)
+		return "", fmt.Errorf("HTML generation error with Gemini: %w", err)
 	}
 
 	// Process the response
 	if len(resp.Candidates) == 0 {
-		return "", errors.New("HTML не сгенерирован")
+		return "", errors.New("HTML not generated")
 	}
 
 	// Extract text from response

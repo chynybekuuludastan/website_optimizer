@@ -23,6 +23,7 @@ type Config struct {
 	JWTExpiration time.Duration
 
 	// External APIs
+	DefaultLLMProvider   string
 	OpenAIAPIKey         string
 	GeminiAPIKey         string
 	LighthouseURL        string
@@ -61,10 +62,11 @@ func NewConfig() *Config {
 		JWTExpiration: time.Duration(jwtExpirationHours) * time.Hour,
 
 		// External APIs
-		OpenAIAPIKey:     getEnv("OPENAI_API_KEY", ""),
-		GeminiAPIKey:     getEnv("GEMINI_API_KEY", ""),
-		LighthouseURL:    getEnv("LIGHTHOUSE_API_URL", "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"),
-		LighthouseAPIKey: getEnv("LIGHTHOUSE_API_KEY", "default-key"),
+		DefaultLLMProvider: getEnv("DEFAULT_LLM_PROVIDER", "gemini"),
+		OpenAIAPIKey:       getEnv("OPENAI_API_KEY", ""),
+		GeminiAPIKey:       getEnv("GEMINI_API_KEY", ""),
+		LighthouseURL:      getEnv("LIGHTHOUSE_API_URL", "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"),
+		LighthouseAPIKey:   getEnv("LIGHTHOUSE_API_KEY", "default-key"),
 		LighthouseTimeout: func() int {
 			timeout, _ := strconv.Atoi(getEnv("LIGHTHOUSE_TIMEOUT", "60"))
 			return timeout
