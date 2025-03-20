@@ -10,14 +10,14 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
 )
 
-// LighthouseAnalyzer анализирует сайт с помощью Lighthouse
+// LighthouseAnalyzer analyzes a website using Google Lighthouse
 type LighthouseAnalyzer struct {
 	*BaseAnalyzer
 	LighthouseClient *lighthouse.Client
 	Config           *config.Config
 }
 
-// NewLighthouseAnalyzer создает новый анализатор Lighthouse
+// NewLighthouseAnalyzer creates a new Lighthouse analyzer
 func NewLighthouseAnalyzer(cfg *config.Config) *LighthouseAnalyzer {
 	return &LighthouseAnalyzer{
 		BaseAnalyzer:     NewBaseAnalyzer(LighthouseType),
@@ -26,50 +26,57 @@ func NewLighthouseAnalyzer(cfg *config.Config) *LighthouseAnalyzer {
 	}
 }
 
-// Analyze выполняет анализ сайта с помощью Lighthouse
+// Analyze performs a website analysis using Lighthouse
 func (a *LighthouseAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteData, prevResults map[AnalyzerType]map[string]interface{}) (map[string]interface{}, error) {
-	// Настройка опций аудита
+	// Check context
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Set up audit options
 	options := lighthouse.DefaultAuditOptions()
 
-	// Определяем все нужные категории анализа
+	// Configure all analysis categories
 	options.Categories = []lighthouse.Category{
-		lighthouse.CategoryPerformance,   // Производительность
-		lighthouse.CategoryAccessibility, // Доступность
-		lighthouse.CategoryBestPractices, // Лучшие практики
+		lighthouse.CategoryPerformance,   // Performance
+		lighthouse.CategoryAccessibility, // Accessibility
+		lighthouse.CategoryBestPractices, // Best practices
 		lighthouse.CategorySEO,           // SEO
 	}
 
-	// Устанавливаем мобильный или десктопный режим
+	// Set mobile or desktop mode
 	if a.Config.LighthouseMobileMode {
 		options.FormFactor = lighthouse.FormFactorMobile
 	} else {
 		options.FormFactor = lighthouse.FormFactorDesktop
 	}
 
-	// Устанавливаем локаль
+	// Set locale
 	options.Locale = "ru"
 
-	// Логируем начало анализа
+	// Log analysis start
 	startTime := time.Now()
 	a.SetMetric("lighthouse_start_time", startTime.Format(time.RFC3339))
 	a.SetMetric("lighthouse_url", data.URL)
 
-	// Запускаем полный анализ с преобразованием результатов
+	// Run full analysis and convert results
 	result, err := a.LighthouseClient.AnalyzeURL(ctx, data.URL, options)
 	if err != nil {
 		a.AddIssue(map[string]interface{}{
 			"type":        "lighthouse_error",
 			"severity":    "high",
-			"description": "Ошибка при выполнении аудита Lighthouse",
+			"description": "Error running Lighthouse audit",
 			"error":       err.Error(),
 		})
-		// Устанавливаем минимальные метрики для отчета об ошибке
+		// Set minimal metrics for error reporting
 		a.SetMetric("lighthouse_error", err.Error())
 		a.SetMetric("lighthouse_success", false)
-		return a.GetMetrics(), fmt.Errorf("ошибка Lighthouse анализа: %w", err)
+		return a.GetMetrics(), fmt.Errorf("lighthouse analysis error: %w", err)
 	}
 
-	// Анализ прошел успешно
+	// Analysis succeeded
 	a.SetMetric("lighthouse_success", true)
 	a.SetMetric("lighthouse_end_time", time.Now().Format(time.RFC3339))
 	a.SetMetric("lighthouse_version", result.LighthouseVersion)
@@ -77,31 +84,31 @@ func (a *LighthouseAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteDa
 	a.SetMetric("lighthouse_total_time", result.TotalAnalysisTime)
 	a.SetMetric("analysis_duration", time.Since(startTime).Seconds())
 
-	// Добавляем метрики производительности
+	// Add performance metrics
 	a.SetMetric("performance_metrics", result.Metrics)
 
-	// Добавляем оценки по категориям
+	// Add category scores
 	categoryScores := make(map[string]float64)
 	for category, score := range result.Scores {
 		categoryScores[category] = score
 	}
 	a.SetMetric("category_scores", categoryScores)
 
-	// Добавляем важные аудиты
-	// Сохраняем полные данные аудитов для использования другими анализаторами
+	// Add important audits
+	// Save full audit data for use by other analyzers
 	a.SetMetric("audits", result.Audits)
 
-	// Добавляем проблемы из Lighthouse
+	// Add issues from Lighthouse
 	for _, issue := range result.Issues {
 		a.AddIssue(issue)
 	}
 
-	// Добавляем рекомендации из Lighthouse
+	// Add recommendations from Lighthouse
 	for _, recommendation := range result.Recommendations {
 		a.AddRecommendation(recommendation)
 	}
 
-	// Расчет общей оценки на основе категорий
+	// Calculate overall score based on categories
 	totalScore := 0.0
 	count := 0
 
@@ -112,7 +119,7 @@ func (a *LighthouseAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteDa
 
 	score := 0.0
 	if count > 0 {
-		score = totalScore / float64(count) * 100 // Нормализуем до 100
+		score = totalScore / float64(count) * 100 // Normalize to 100
 	}
 
 	a.SetMetric("score", score)
@@ -120,19 +127,18 @@ func (a *LighthouseAnalyzer) Analyze(ctx context.Context, data *parser.WebsiteDa
 	return a.GetMetrics(), nil
 }
 
-// GetPerformanceMetricsString возвращает строковое представление метрик производительности
 func (a *LighthouseAnalyzer) GetPerformanceMetricsString() string {
 	metrics, ok := a.GetMetrics()["performance_metrics"]
 	if !ok {
-		return "Метрики производительности недоступны"
+		return "Performance metrics not available"
 	}
 
 	metricsMap, ok := metrics.(lighthouse.MetricsResult)
 	if !ok {
-		return "Некорректный формат метрик производительности"
+		return "Invalid performance metrics format"
 	}
 
-	result := "Метрики производительности:\n"
+	result := "Performance metrics:\n"
 	result += fmt.Sprintf("- First Contentful Paint: %.1f ms\n", metricsMap.FirstContentfulPaint)
 	result += fmt.Sprintf("- Largest Contentful Paint: %.1f ms\n", metricsMap.LargestContentfulPaint)
 	result += fmt.Sprintf("- Total Blocking Time: %.1f ms\n", metricsMap.TotalBlockingTime)
