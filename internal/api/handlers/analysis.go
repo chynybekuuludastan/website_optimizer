@@ -731,8 +731,8 @@ func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
 				"category":              category,
 				"status":                analysis.Status,
 				"metrics":               nil,
-				"issues":                []models.Issue{},
-				"recommendations":       []models.Recommendation{},
+				"issues":                []interface{}{},
+				"recommendations":       []interface{}{},
 				"issues_count":          0,
 				"recommendations_count": 0,
 			},
@@ -751,7 +751,56 @@ func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
 		recommendations = []models.Recommendation{}
 	}
 
-	// Parse metrics data
+	// Создаем оптимизированные структуры для ответа
+	type OptimizedIssue struct {
+		ID          string    `json:"id"`
+		Category    string    `json:"category"`
+		Severity    string    `json:"severity"`
+		Title       string    `json:"title"`
+		Description string    `json:"description,omitempty"`
+		Location    string    `json:"location,omitempty"`
+		CreatedAt   time.Time `json:"created_at"`
+	}
+
+	type OptimizedRecommendation struct {
+		ID          string    `json:"id"`
+		Category    string    `json:"category"`
+		Priority    string    `json:"priority"`
+		Title       string    `json:"title"`
+		Description string    `json:"description,omitempty"`
+		CodeSnippet string    `json:"code_snippet,omitempty"`
+		CreatedAt   time.Time `json:"created_at"`
+	}
+
+	// Преобразуем проблемы в оптимизированный формат
+	optimizedIssues := make([]OptimizedIssue, len(issues))
+	for i, issue := range issues {
+		optimizedIssues[i] = OptimizedIssue{
+			ID:          issue.ID.String(),
+			Category:    issue.Category,
+			Severity:    issue.Severity,
+			Title:       issue.Title,
+			Description: issue.Description,
+			Location:    issue.Location,
+			CreatedAt:   issue.CreatedAt,
+		}
+	}
+
+	// Преобразуем рекомендации в оптимизированный формат
+	optimizedRecommendations := make([]OptimizedRecommendation, len(recommendations))
+	for i, rec := range recommendations {
+		optimizedRecommendations[i] = OptimizedRecommendation{
+			ID:          rec.ID.String(),
+			Category:    rec.Category,
+			Priority:    rec.Priority,
+			Title:       rec.Title,
+			Description: rec.Description,
+			CodeSnippet: rec.CodeSnippet,
+			CreatedAt:   rec.CreatedAt,
+		}
+	}
+
+	// Обрабатываем метрики
 	var result map[string]interface{}
 	if err := json.Unmarshal(metrics[0].Value, &result); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -760,16 +809,19 @@ func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
 		})
 	}
 
+	// Формируем финальный оптимизированный ответ
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": fiber.Map{
 			"metrics":               result,
-			"issues":                issues,
-			"recommendations":       recommendations,
+			"issues":                optimizedIssues,
+			"recommendations":       optimizedRecommendations,
 			"score":                 result["score"],
-			"issues_count":          len(issues),
-			"recommendations_count": len(recommendations),
+			"issues_count":          len(optimizedIssues),
+			"recommendations_count": len(optimizedRecommendations),
 			"status":                analysis.Status,
+			"website_url":           analysis.Website.URL, // Добавляем полезную информацию
+			"analysis_id":           analysisID.String(),  // ID анализа для дальнейших запросов
 		},
 	})
 }

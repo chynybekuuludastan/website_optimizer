@@ -1,4 +1,3 @@
-// internal/repository/metrics_repository.go
 package repository
 
 import (
@@ -85,17 +84,47 @@ func NewRecommendationRepository(db *gorm.DB) RecommendationRepository {
 	}
 }
 
-// FindByAnalysisID finds recommendations by analysis ID
-func (r *recommendationRepository) FindByAnalysisID(analysisID uuid.UUID) ([]models.Recommendation, error) {
+func (r *recommendationRepository) FindByCategory(analysisID uuid.UUID, category string) ([]models.Recommendation, error) {
 	var recommendations []models.Recommendation
-	err := r.DB.Where("analysis_id = ?", analysisID).Order("priority, category").Find(&recommendations).Error
+
+	err := r.DB.Where("analysis_id = ? AND category = ?", analysisID, category).
+		Preload("Analysis", func(db *gorm.DB) *gorm.DB {
+			return db.Omit("Metrics", "Recommendations", "ContentImprovements", "Issues")
+		}).
+		Preload("Analysis.Website").
+		Preload("Analysis.User").
+		Order("priority").
+		Find(&recommendations).Error
+
+	// Установка правильных ID для связанных сущностей
+	for i := range recommendations {
+		if recommendations[i].Analysis.ID == uuid.Nil {
+			recommendations[i].Analysis.ID = analysisID
+		}
+	}
+
 	return recommendations, err
 }
 
-// FindByCategory finds recommendations by analysis ID and category
-func (r *recommendationRepository) FindByCategory(analysisID uuid.UUID, category string) ([]models.Recommendation, error) {
+func (r *recommendationRepository) FindByAnalysisID(analysisID uuid.UUID) ([]models.Recommendation, error) {
 	var recommendations []models.Recommendation
-	err := r.DB.Where("analysis_id = ? AND category = ?", analysisID, category).Order("priority").Find(&recommendations).Error
+
+	err := r.DB.Where("analysis_id = ?", analysisID).
+		Preload("Analysis", func(db *gorm.DB) *gorm.DB {
+			return db.Omit("Metrics", "Recommendations", "ContentImprovements", "Issues")
+		}).
+		Preload("Analysis.Website").
+		Preload("Analysis.User").
+		Order("priority, category").
+		Find(&recommendations).Error
+
+	// Установка правильных ID для связанных сущностей
+	for i := range recommendations {
+		if recommendations[i].Analysis.ID == uuid.Nil {
+			recommendations[i].Analysis.ID = analysisID
+		}
+	}
+
 	return recommendations, err
 }
 
@@ -132,20 +161,6 @@ func NewIssueRepository(db *gorm.DB) IssueRepository {
 	}
 }
 
-// FindByAnalysisID finds issues by analysis ID
-func (r *issueRepository) FindByAnalysisID(analysisID uuid.UUID) ([]models.Issue, error) {
-	var issues []models.Issue
-	err := r.DB.Where("analysis_id = ?", analysisID).Order("severity, category").Find(&issues).Error
-	return issues, err
-}
-
-// FindByCategory finds issues by analysis ID and category
-func (r *issueRepository) FindByCategory(analysisID uuid.UUID, category string) ([]models.Issue, error) {
-	var issues []models.Issue
-	err := r.DB.Where("analysis_id = ? AND category = ?", analysisID, category).Order("severity").Find(&issues).Error
-	return issues, err
-}
-
 // FindBySeverity finds issues by analysis ID and severity
 func (r *issueRepository) FindBySeverity(analysisID uuid.UUID, severity string) ([]models.Issue, error) {
 	var issues []models.Issue
@@ -158,41 +173,49 @@ func (r *issueRepository) CreateBatch(issues []models.Issue) error {
 	return r.DB.Create(&issues).Error
 }
 
-// ContentImprovementRepository defines operations for ContentImprovement model
-type ContentImprovementRepository interface {
-	Repository
-	FindByAnalysisID(analysisID uuid.UUID) ([]models.ContentImprovement, error)
-	FindByElementType(analysisID uuid.UUID, elementType string) ([]models.ContentImprovement, error)
-	CreateBatch(improvements []models.ContentImprovement) error
-}
+func (r *issueRepository) FindByCategory(analysisID uuid.UUID, category string) ([]models.Issue, error) {
+	var issues []models.Issue
 
-// contentImprovementRepository implements ContentImprovementRepository
-type contentImprovementRepository struct {
-	*BaseRepository
-}
+	err := r.DB.Where("analysis_id = ? AND category = ?", analysisID, category).
+		Preload("Analysis", func(db *gorm.DB) *gorm.DB {
+			return db.Omit("Metrics", "Recommendations", "ContentImprovements", "Issues")
+		}).
+		Preload("Analysis.Website").
+		Preload("Analysis.User").
+		Preload("Analysis.User.Role").
+		Order("severity").
+		Find(&issues).Error
 
-// NewContentImprovementRepository creates a new content improvement repository
-func NewContentImprovementRepository(db *gorm.DB) ContentImprovementRepository {
-	return &contentImprovementRepository{
-		BaseRepository: NewBaseRepository(db),
+	// При получении данных для модели Issue, необходимо убедиться,
+	// что связанные ID правильно заполнены
+	for i := range issues {
+		// Убедимся, что анализу присвоен правильный ID
+		if issues[i].Analysis.ID == uuid.Nil {
+			issues[i].Analysis.ID = analysisID
+		}
 	}
+
+	return issues, err
 }
 
-// FindByAnalysisID finds content improvements by analysis ID
-func (r *contentImprovementRepository) FindByAnalysisID(analysisID uuid.UUID) ([]models.ContentImprovement, error) {
-	var improvements []models.ContentImprovement
-	err := r.DB.Where("analysis_id = ?", analysisID).Find(&improvements).Error
-	return improvements, err
-}
+func (r *issueRepository) FindByAnalysisID(analysisID uuid.UUID) ([]models.Issue, error) {
+	var issues []models.Issue
 
-// FindByElementType finds content improvements by analysis ID and element type
-func (r *contentImprovementRepository) FindByElementType(analysisID uuid.UUID, elementType string) ([]models.ContentImprovement, error) {
-	var improvements []models.ContentImprovement
-	err := r.DB.Where("analysis_id = ? AND element_type = ?", analysisID, elementType).Find(&improvements).Error
-	return improvements, err
-}
+	err := r.DB.Where("analysis_id = ?", analysisID).
+		Preload("Analysis", func(db *gorm.DB) *gorm.DB {
+			return db.Omit("Metrics", "Recommendations", "ContentImprovements", "Issues")
+		}).
+		Preload("Analysis.Website").
+		Preload("Analysis.User").
+		Preload("Analysis.User.Role").
+		Order("severity, category").
+		Find(&issues).Error
 
-// CreateBatch creates multiple content improvements in a batch
-func (r *contentImprovementRepository) CreateBatch(improvements []models.ContentImprovement) error {
-	return r.DB.Create(&improvements).Error
+	for i := range issues {
+		if issues[i].Analysis.ID == uuid.Nil {
+			issues[i].Analysis.ID = analysisID
+		}
+	}
+
+	return issues, err
 }

@@ -80,42 +80,39 @@ type AnalysisMetric struct {
 	CreatedAt  time.Time      `gorm:"autoCreateTime"`
 }
 
-// Recommendation represents a recommendation for website improvement
-type Recommendation struct {
-	ID          uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
-	AnalysisID  uuid.UUID `gorm:"type:uuid;not null;index"`
-	Analysis    Analysis  `gorm:"foreignKey:AnalysisID"`
-	Category    string    `gorm:"type:varchar(100);not null;index"`
-	Priority    string    `gorm:"type:varchar(50);not null;index"` // high, medium, low
-	Title       string    `gorm:"type:text;not null"`              // Changed from varchar(255) to text
-	Description string    `gorm:"type:text"`
-	CodeSnippet string    `gorm:"type:text"`
-	CreatedAt   time.Time `gorm:"autoCreateTime"`
-}
-
-// ContentImprovement represents LLM-generated content improvements
-type ContentImprovement struct {
-	ID              uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
-	AnalysisID      uuid.UUID `gorm:"type:uuid;not null;index"`
-	Analysis        Analysis  `gorm:"foreignKey:AnalysisID"`
-	ElementType     string    `gorm:"type:varchar(50);not null;index"` // heading, cta, content, etc.
-	OriginalContent string    `gorm:"type:text"`
-	ImprovedContent string    `gorm:"type:text"`
-	LLMModel        string    `gorm:"type:varchar(100)"`
-	CreatedAt       time.Time `gorm:"autoCreateTime"`
-}
-
-// Issue represents a problem found during analysis
 type Issue struct {
 	ID          uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
-	AnalysisID  uuid.UUID `gorm:"type:uuid;not null;index"`
-	Analysis    Analysis  `gorm:"foreignKey:AnalysisID"`
-	Category    string    `gorm:"type:varchar(100);not null;index"` // seo, performance, etc.
-	Severity    string    `gorm:"type:varchar(50);not null;index"`  // high, medium, low
-	Title       string    `gorm:"type:varchar(255);not null"`
-	Description string    `gorm:"type:text"`
-	Location    string    `gorm:"type:text"`
-	CreatedAt   time.Time `gorm:"autoCreateTime"`
+	AnalysisID  uuid.UUID `gorm:"type:uuid;not null;index" json:"analysis_id"`
+	Analysis    Analysis  `gorm:"foreignKey:AnalysisID;references:ID" json:"analysis"`
+	Category    string    `gorm:"type:varchar(100);not null;index" json:"category"`
+	Severity    string    `gorm:"type:varchar(50);not null;index" json:"severity"` // high, medium, low
+	Title       string    `gorm:"type:varchar(255);not null" json:"title"`
+	Description string    `gorm:"type:text" json:"description"`
+	Location    string    `gorm:"type:text" json:"location"`
+	CreatedAt   time.Time `gorm:"autoCreateTime" json:"created_at"`
+}
+
+type Recommendation struct {
+	ID          uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	AnalysisID  uuid.UUID `gorm:"type:uuid;not null;index" json:"analysis_id"`
+	Analysis    Analysis  `gorm:"foreignKey:AnalysisID;references:ID" json:"analysis"`
+	Category    string    `gorm:"type:varchar(100);not null;index" json:"category"`
+	Priority    string    `gorm:"type:varchar(50);not null;index" json:"priority"` // high, medium, low
+	Title       string    `gorm:"type:text;not null" json:"title"`
+	Description string    `gorm:"type:text" json:"description"`
+	CodeSnippet string    `gorm:"type:text" json:"code_snippet"`
+	CreatedAt   time.Time `gorm:"autoCreateTime" json:"created_at"`
+}
+
+type ContentImprovement struct {
+	ID              uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	AnalysisID      uuid.UUID `gorm:"type:uuid;not null;index" json:"analysis_id"`
+	Analysis        Analysis  `gorm:"foreignKey:AnalysisID;references:ID" json:"analysis"`
+	ElementType     string    `gorm:"type:varchar(50);not null;index" json:"element_type"` // heading, cta, content, etc.
+	OriginalContent string    `gorm:"type:text" json:"original_content"`
+	ImprovedContent string    `gorm:"type:text" json:"improved_content"`
+	LLMModel        string    `gorm:"type:varchar(100)" json:"llm_model"`
+	CreatedAt       time.Time `gorm:"autoCreateTime" json:"created_at"`
 }
 
 // UserActivity logs user actions in the system
