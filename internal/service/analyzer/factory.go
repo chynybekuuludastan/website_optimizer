@@ -227,7 +227,39 @@ func (m *AnalyzerManager) RunAnalyzer(
 	return result, err
 }
 
-// RunAllAnalyzers runs all registered analyzers in parallel according to dependencies
+// RegisterCriticalAnalyzers registers only the most important analyzers
+// to decrease analysis time while still providing valuable insights
+func (m *AnalyzerManager) RegisterCriticalAnalyzers() {
+	// First check if Lighthouse API key is available
+	if m.config.LighthouseAPIKey != "" {
+		analyzer, err := m.factory.CreateAnalyzer(LighthouseType)
+		if err == nil {
+			m.RegisterAnalyzer(LighthouseType, analyzer)
+		} else {
+			log.Printf("Failed to create Lighthouse analyzer: %v", err)
+		}
+	} else {
+		log.Println("Lighthouse API key not provided, skipping Lighthouse analyzer")
+	}
+
+	// Register only the most important analyzers - SEO, Security, and Performance
+	criticalAnalyzers := []AnalyzerType{
+		SEOType,
+		SecurityType,
+		PerformanceType,
+	}
+
+	for _, aType := range criticalAnalyzers {
+		analyzer, err := m.factory.CreateAnalyzer(aType)
+		if err == nil {
+			m.RegisterAnalyzer(aType, analyzer)
+		} else {
+			log.Printf("Failed to create analyzer %s: %v", aType, err)
+		}
+	}
+}
+
+// RunAllAnalyzers runs all registered analyzers with improved timeouts and error handling
 func (m *AnalyzerManager) RunAllAnalyzers(ctx context.Context, data *parser.WebsiteData) (map[AnalyzerType]map[string]interface{}, error) {
 	m.executingMu.Lock()
 	if m.isExecuting {
@@ -259,7 +291,10 @@ func (m *AnalyzerManager) RunAllAnalyzers(ctx context.Context, data *parser.Webs
 	executionLayers := m.buildExecutionLayers(sortedAnalyzers)
 
 	// Create a channel to collect errors
-	errorChan := make(chan error, len(sortedAnalyzers))
+	// errorChan := make(chan error, len(sortedAnalyzers))
+
+	// Set a timeout for each layer
+	layerTimeout := 60 * time.Second // Maximum 60 seconds per layer
 
 	// Process each layer sequentially
 	for layerIndex, layer := range executionLayers {
@@ -275,9 +310,17 @@ func (m *AnalyzerManager) RunAllAnalyzers(ctx context.Context, data *parser.Webs
 			})
 		}
 
-		// Execute all analyzers in this layer in parallel
-		var layerWg sync.WaitGroup
+		// Create a context with timeout for this layer
+		layerCtx, layerCancel := context.WithTimeout(ctx, layerTimeout)
 
+		// Create a channel to collect results
+		resultChan := make(chan struct {
+			analyzerType AnalyzerType
+			result       map[string]interface{}
+			err          error
+		}, len(layer))
+
+		// Execute all analyzers in this layer in parallel
 		for _, analyzerType := range layer {
 			m.mu.RLock()
 			analyzer, exists := m.analyzers[analyzerType]
@@ -288,20 +331,8 @@ func (m *AnalyzerManager) RunAllAnalyzers(ctx context.Context, data *parser.Webs
 				continue
 			}
 
-			layerWg.Add(1)
-
+			// Launch analyzer in goroutine
 			go func(at AnalyzerType, a Analyzer) {
-				defer layerWg.Done()
-
-				// Check if context is cancelled
-				select {
-				case <-ctx.Done():
-					errorChan <- fmt.Errorf("analyzer %s cancelled: %w", at, ctx.Err())
-					return
-				default:
-					// Continue with analysis
-				}
-
 				// Get the current set of results to pass to this analyzer
 				resultsMutex.RLock()
 				prevResults := make(map[AnalyzerType]map[string]interface{})
@@ -320,71 +351,70 @@ func (m *AnalyzerManager) RunAllAnalyzers(ctx context.Context, data *parser.Webs
 					})
 				}
 
-				// Execute the analyzer
+				// Execute the analyzer with timeout
 				startTime := time.Now()
-				result, err := a.Analyze(ctx, data, prevResults)
+				result, err := a.Analyze(layerCtx, data, prevResults)
 				duration := time.Since(startTime)
 
-				// Check for errors
-				if err != nil {
-					errorMsg := fmt.Sprintf("error in analyzer %s: %v", at, err)
-					log.Println(errorMsg)
-					errorChan <- fmt.Errorf(errorMsg)
+				// Send result to channel
+				resultChan <- struct {
+					analyzerType AnalyzerType
+					result       map[string]interface{}
+					err          error
+				}{at, result, err}
 
-					// Report failure
-					if m.progressCallback != nil {
+				// Report completion regardless of error
+				if m.progressCallback != nil {
+					if err != nil {
 						m.progressCallback(ProgressUpdate{
 							AnalyzerType: string(at),
 							Progress:     100.0,
-							Message:      fmt.Sprintf("Failed: %v", err),
+							Message:      fmt.Sprintf("Failed in %v: %v", duration, err),
 							Timestamp:    time.Now(),
 						})
+					} else {
+						m.progressCallback(ProgressUpdate{
+							AnalyzerType:   string(at),
+							Progress:       100.0,
+							Message:        fmt.Sprintf("Completed in %v", duration),
+							PartialResults: result,
+							Timestamp:      time.Now(),
+						})
 					}
-					return
-				}
-
-				// Save results
-				resultsMutex.Lock()
-				results[at] = result
-				resultsMutex.Unlock()
-
-				// Mark as completed
-				completedMutex.Lock()
-				completed[at] = true
-				completedMutex.Unlock()
-
-				// Report completion
-				if m.progressCallback != nil {
-					m.progressCallback(ProgressUpdate{
-						AnalyzerType:   string(at),
-						Progress:       100.0,
-						Message:        fmt.Sprintf("Completed in %v", duration),
-						PartialResults: result,
-						Timestamp:      time.Now(),
-						Details: map[string]interface{}{
-							"duration_ms": duration.Milliseconds(),
-							"layer":       layerIndex + 1,
-							"priority":    a.GetPriority(),
-						},
-					})
 				}
 
 				log.Printf("Analyzer %s completed in %v", at, duration)
 			}(analyzerType, analyzer)
 		}
 
-		// Wait for all analyzers in this layer to complete
-		layerWg.Wait()
+		// Collect results with timeout
+		for i := 0; i < len(layer); i++ {
+			select {
+			case res := <-resultChan:
+				if res.err != nil {
+					log.Printf("Error in analyzer %s: %v", res.analyzerType, res.err)
+					// Continue with other analyzers, don't fail the whole process
+				} else {
+					resultsMutex.Lock()
+					results[res.analyzerType] = res.result
+					resultsMutex.Unlock()
 
-		// Check for errors after each layer
-		select {
-		case err := <-errorChan:
-			return results, err
-		default:
-			// No errors, continue to next layer
+					completedMutex.Lock()
+					completed[res.analyzerType] = true
+					completedMutex.Unlock()
+				}
+			case <-layerCtx.Done():
+				// Layer timeout reached, log and continue to next layer
+				log.Printf("Layer %d timeout reached after %v, continuing to next layer",
+					layerIndex+1, layerTimeout)
+				break
+			}
 		}
 
-		// Check if context was cancelled
+		// Cancel the layer context
+		layerCancel()
+
+		// Check if parent context was cancelled
 		select {
 		case <-ctx.Done():
 			return results, ctx.Err()

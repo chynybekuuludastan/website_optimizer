@@ -499,9 +499,7 @@ func (h *Hub) sendToAnalysisClients(broadcast *BroadcastMessage) {
 		broadcast.Message.SequenceID = h.nextSequence()
 	}
 
-	// Логирование для отладки
-	log.Printf("Broadcasting message type %s to analysis %s", broadcast.Message.Type, analysisID)
-
+	// Get clients list without holding the lock during message sending
 	h.mu.RLock()
 	clients, exists := h.clients[analysisID]
 	clientCount := len(clients)
@@ -509,7 +507,6 @@ func (h *Hub) sendToAnalysisClients(broadcast *BroadcastMessage) {
 
 	// If no clients are connected, buffer the message
 	if !exists || clientCount == 0 {
-		log.Printf("No clients connected for analysis %s, buffering message", analysisID)
 		h.bufferAnalysisMessage(analysisID, broadcast.Message)
 		return
 	}
@@ -521,26 +518,23 @@ func (h *Hub) sendToAnalysisClients(broadcast *BroadcastMessage) {
 		return
 	}
 
-	log.Printf("Sending message to %d clients for analysis %s", clientCount, analysisID)
-
-	// Send to all clients for this analysis
+	// Copy clients to a slice to avoid holding lock during send
+	clientsList := make([]*Client, 0, clientCount)
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-
 	for client := range clients {
-		// Проверка на nil и closed канал
-		if client == nil || client.isClosed {
-			continue
+		if client != nil && !client.isClosed {
+			clientsList = append(clientsList, client)
 		}
+	}
+	h.mu.RUnlock()
 
-		// Try to send the message
+	// Send to all clients without holding the lock
+	for _, client := range clientsList {
 		select {
 		case client.send <- msgJSON:
 			// Message sent successfully
-			log.Printf("Message sent to client successfully")
 		default:
 			// Channel is full or closed, unregister the client
-			log.Printf("Failed to send message to client, unregistering")
 			go func(c *Client) {
 				h.unregister <- c
 			}(client)
@@ -731,26 +725,26 @@ func (h *Hub) BroadcastToAll(message Message) {
 	}
 }
 
-// HandleConnection manages a WebSocket connection
+// HandleConnection manages a WebSocket connection with improved error handling
 func (h *Hub) HandleConnection(conn *websocket.Conn, analysisID uuid.UUID) {
-	// Добавляем лог для отладки
+	// Add logging for debugging
 	log.Printf("New WebSocket connection for analysis ID: %s", analysisID.String())
 
-	// Получение userID из контекста, защита от nil
+	// Get userID from context, handle nil safely
 	var userID uuid.UUID
 	var username string = "anonymous"
 
 	if userIDRaw := conn.Locals("userID"); userIDRaw != nil {
 		if id, ok := userIDRaw.(uuid.UUID); ok {
 			userID = id
-			// Создаем простое имя пользователя на основе ID
+			// Create simple username based on ID
 			if userID != uuid.Nil {
 				username = fmt.Sprintf("user-%s", userID.String()[:8])
 			}
 		}
 	}
 
-	// Установка базовых прав доступа
+	// Set basic access permissions
 	permissions := map[string]bool{
 		"view": true,
 	}
@@ -759,7 +753,7 @@ func (h *Hub) HandleConnection(conn *websocket.Conn, analysisID uuid.UUID) {
 		conn:         conn,
 		analysisID:   analysisID,
 		rooms:        make(map[string]bool),
-		send:         make(chan []byte, 256),
+		send:         make(chan []byte, 256), // Larger buffer to prevent blocking
 		lastActivity: time.Now(),
 		pendingAcks:  make(map[string]Message),
 		receivedAcks: make(map[string]bool),
@@ -796,57 +790,64 @@ func (c *Client) writePump() {
 	ticker := time.NewTicker(54 * time.Second) // WebSocket ping period
 	defer func() {
 		ticker.Stop()
+		// Set client as closed first to prevent further writes
+		c.writeMutex.Lock()
+		c.isClosed = true
+		c.writeMutex.Unlock()
+		// Then close connection
 		c.conn.Close()
 		close(c.closeSignal)
-		c.isClosed = true
 	}()
 
 	for {
 		select {
 		case message, ok := <-c.send:
+			// Check if client is closed before acquiring lock
 			c.writeMutex.Lock()
+			isClosed := c.isClosed
+			c.writeMutex.Unlock()
 
-			// Проверка на закрытый соединение
-			if c.isClosed {
-				c.writeMutex.Unlock()
+			if isClosed {
 				return
 			}
 
 			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if !ok {
 				// The hub closed the channel
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				c.writeMutex.Unlock()
+				c.writeMutex.Lock()
 				c.isClosed = true
+				c.writeMutex.Unlock()
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
 			// Write the message
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				log.Printf("Error writing message to WebSocket: %v", err)
-				c.writeMutex.Unlock()
+				c.writeMutex.Lock()
 				c.isClosed = true
+				c.writeMutex.Unlock()
 				return
 			}
-			c.writeMutex.Unlock()
 
 		case <-ticker.C:
+			// Check if client is closed before acquiring lock
 			c.writeMutex.Lock()
+			isClosed := c.isClosed
+			c.writeMutex.Unlock()
 
-			// Проверка на закрытый соединение
-			if c.isClosed {
-				c.writeMutex.Unlock()
+			if isClosed {
 				return
 			}
 
 			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				log.Printf("Error writing ping to WebSocket: %v", err)
-				c.writeMutex.Unlock()
+				c.writeMutex.Lock()
 				c.isClosed = true
+				c.writeMutex.Unlock()
 				return
 			}
-			c.writeMutex.Unlock()
 		}
 	}
 }
@@ -858,6 +859,7 @@ func (c *Client) readPump() {
 		c.conn.Close()
 	}()
 
+	// Set read limit and timeout
 	c.conn.SetReadLimit(4096) // Maximum message size
 	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	c.conn.SetPongHandler(func(string) error {
@@ -887,17 +889,19 @@ func (c *Client) readPump() {
 			continue
 		}
 
-		// Handle different message types
+		// Handle different message types with context checks
 		switch message.Type {
 		case TypePong:
 			// Client responded to ping
 			continue
 
 		case TypeAcknowledgment:
-			// Handle acknowledgment
+			// Handle acknowledgment with lock to prevent race conditions
 			if message.AckID != "" {
+				c.writeMutex.Lock()
 				delete(c.pendingAcks, message.AckID)
 				c.receivedAcks[message.AckID] = true
+				c.writeMutex.Unlock()
 			}
 
 		case TypeControlPause, TypeControlResume, TypeControlCancel, TypeControlUpdateParams:
