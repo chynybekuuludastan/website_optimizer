@@ -2,10 +2,13 @@
 package repository
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
+	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -24,6 +27,9 @@ type AnalysisRepository interface {
 	FindWithIssues(analysisID uuid.UUID) (*models.Analysis, []models.Issue, error)
 	CountByDateRange(startDate, endDate time.Time) (int64, error)
 	FindByDateRange(startDate, endDate time.Time, page, pageSize int) ([]*models.Analysis, int64, error)
+	FindLatestByUserID(userID uuid.UUID, limit int) ([]*models.Analysis, error)
+	UpdateMetadata(analysisID uuid.UUID, metadata datatypes.JSON) error
+	CountByStatusAndDate(status string, startDate, endDate time.Time) (int64, error)
 }
 
 // analysisRepository implements AnalysisRepository
@@ -32,9 +38,9 @@ type analysisRepository struct {
 }
 
 // NewAnalysisRepository creates a new analysis repository
-func NewAnalysisRepository(db *gorm.DB) AnalysisRepository {
+func NewAnalysisRepository(db *gorm.DB, redisClient *redis.Client) AnalysisRepository {
 	return &analysisRepository{
-		BaseRepository: NewBaseRepository(db),
+		BaseRepository: NewBaseRepository(db, redisClient),
 	}
 }
 
@@ -274,4 +280,72 @@ func (r *analysisRepository) FindByDateRange(startDate, endDate time.Time, page,
 	}
 
 	return analyses, count, nil
+}
+
+// FindLatestByUserID finds the most recent analyses for a specific user with caching
+func (r *analysisRepository) FindLatestByUserID(userID uuid.UUID, limit int) ([]*models.Analysis, error) {
+	// Try to get from cache if available
+	if r.CacheRepo != nil {
+		cachedAnalyses, err := r.CacheRepo.GetUserAnalyses(userID)
+		if err == nil && cachedAnalyses != nil && len(cachedAnalyses) >= limit {
+			return cachedAnalyses[:limit], nil
+		}
+	}
+
+	// Otherwise, fetch from database
+	var analyses []*models.Analysis
+
+	err := r.DB.Where("user_id = ?", userID).
+		Preload("Website").
+		Order("created_at DESC").
+		Limit(limit).
+		Find(&analyses).Error
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to find latest analyses: %w", err)
+	}
+
+	// Cache the result for future requests
+	if r.CacheRepo != nil && len(analyses) > 0 {
+		go r.CacheRepo.CacheUserAnalyses(userID, analyses)
+	}
+
+	return analyses, nil
+}
+
+// UpdateMetadata updates the metadata field of an analysis
+func (r *analysisRepository) UpdateMetadata(analysisID uuid.UUID, metadata datatypes.JSON) error {
+	result := r.DB.Model(&models.Analysis{}).
+		Where("id = ?", analysisID).
+		Update("metadata", metadata)
+
+	if result.Error != nil {
+		return fmt.Errorf("failed to update analysis metadata: %w", result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("analysis not found: %s", analysisID)
+	}
+
+	return nil
+}
+
+// CountByStatusAndDate counts analyses by status within a date range
+func (r *analysisRepository) CountByStatusAndDate(status string, startDate, endDate time.Time) (int64, error) {
+	var count int64
+
+	query := r.DB.Model(&models.Analysis{})
+
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	err := query.Where("created_at BETWEEN ? AND ?", startDate, endDate).
+		Count(&count).Error
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to count analyses by status and date: %w", err)
+	}
+
+	return count, nil
 }

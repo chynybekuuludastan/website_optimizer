@@ -2,6 +2,7 @@ package repository
 
 import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
+	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -26,9 +27,9 @@ type userRepository struct {
 }
 
 // NewUserRepository creates a new user repository
-func NewUserRepository(db *gorm.DB) UserRepository {
+func NewUserRepository(db *gorm.DB, redisClient *redis.Client) UserRepository {
 	return &userRepository{
-		BaseRepository: NewBaseRepository(db),
+		BaseRepository: NewBaseRepository(db, redisClient),
 	}
 }
 

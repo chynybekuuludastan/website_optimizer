@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"github.com/chynybekuuludastan/website_optimizer/internal/repository/cache"
+	"github.com/go-redis/redis/v8"
 	"gorm.io/gorm"
 )
 
@@ -15,12 +17,21 @@ type Repository interface {
 
 // BaseRepository implements basic repository operations
 type BaseRepository struct {
-	DB *gorm.DB
+	DB        *gorm.DB
+	CacheRepo *cache.Repository
 }
 
 // NewBaseRepository creates a new base repository
-func NewBaseRepository(db *gorm.DB) *BaseRepository {
-	return &BaseRepository{DB: db}
+func NewBaseRepository(db *gorm.DB, redisClient *redis.Client) *BaseRepository {
+	var cacheRepo *cache.Repository
+	if redisClient != nil {
+		cacheRepo = cache.NewRepository(redisClient)
+	}
+
+	return &BaseRepository{
+		DB:        db,
+		CacheRepo: cacheRepo,
+	}
 }
 
 // Create creates a new entity

@@ -1,8 +1,11 @@
-// internal/repository/website_repository.go
 package repository
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
+	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -15,6 +18,8 @@ type WebsiteRepository interface {
 	Search(query string, page, pageSize int) ([]*models.Website, int64, error)
 	FindWithAnalyses(websiteID uuid.UUID) (*models.Website, []models.Analysis, error)
 	ExistsByURL(url string) (bool, error)
+	FindDomainStatistics(domain string) (map[string]interface{}, error)
+	FindPopularWebsites(limit int) ([]*models.Website, error)
 }
 
 // websiteRepository implements WebsiteRepository
@@ -23,9 +28,9 @@ type websiteRepository struct {
 }
 
 // NewWebsiteRepository creates a new website repository
-func NewWebsiteRepository(db *gorm.DB) WebsiteRepository {
+func NewWebsiteRepository(db *gorm.DB, redisClient *redis.Client) WebsiteRepository {
 	return &websiteRepository{
-		BaseRepository: NewBaseRepository(db),
+		BaseRepository: NewBaseRepository(db, redisClient),
 	}
 }
 
@@ -116,4 +121,84 @@ func (r *websiteRepository) ExistsByURL(url string) (bool, error) {
 	var count int64
 	err := r.DB.Model(&models.Website{}).Where("url = ?", url).Count(&count).Error
 	return count > 0, err
+}
+
+// FindDomainStatistics gathers statistics for a specific domain
+func (r *websiteRepository) FindDomainStatistics(domain string) (map[string]interface{}, error) {
+	stats := make(map[string]interface{})
+
+	// Count total analyses for this domain
+	var analysesCount int64
+	err := r.DB.Model(&models.Analysis{}).
+		Joins("JOIN websites ON analyses.website_id = websites.id").
+		Where("websites.url LIKE ?", "%"+domain+"%").
+		Count(&analysesCount).Error
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to count domain analyses: %w", err)
+	}
+
+	stats["analyses_count"] = analysesCount
+
+	// Get average score if available in metadata
+	var avgScore float64
+	err = r.DB.Model(&models.Analysis{}).
+		Joins("JOIN websites ON analyses.website_id = websites.id").
+		Where("websites.url LIKE ?", "%"+domain+"%").
+		Select("AVG(CAST(metadata->>'overall_score' AS FLOAT))").
+		Row().Scan(&avgScore)
+
+	// Ignore error as the score might not be available in all analyses
+	if err == nil {
+		stats["average_score"] = avgScore
+	}
+
+	// Get last analysis date
+	var lastAnalysis time.Time
+	err = r.DB.Model(&models.Analysis{}).
+		Joins("JOIN websites ON analyses.website_id = websites.id").
+		Where("websites.url LIKE ?", "%"+domain+"%").
+		Order("analyses.created_at DESC").
+		Limit(1).
+		Select("analyses.created_at").
+		Row().Scan(&lastAnalysis)
+
+	if err == nil && !lastAnalysis.IsZero() {
+		stats["last_analysis_date"] = lastAnalysis
+	}
+
+	return stats, nil
+}
+
+// FindPopularWebsites finds the most frequently analyzed websites with caching
+func (r *websiteRepository) FindPopularWebsites(limit int) ([]*models.Website, error) {
+	// Try to get from cache if available
+	if r.CacheRepo != nil {
+		cachedWebsites, err := r.CacheRepo.GetPopularWebsites()
+		if err == nil && cachedWebsites != nil && len(cachedWebsites) >= limit {
+			return cachedWebsites[:limit], nil
+		}
+	}
+
+	// Otherwise, fetch from database
+	var websites []*models.Website
+
+	err := r.DB.Model(&models.Website{}).
+		Select("websites.*, COUNT(analyses.id) as analysis_count").
+		Joins("LEFT JOIN analyses ON websites.id = analyses.website_id").
+		Group("websites.id").
+		Order("analysis_count DESC").
+		Limit(limit).
+		Find(&websites).Error
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to find popular websites: %w", err)
+	}
+
+	// Cache the result for future requests
+	if r.CacheRepo != nil && len(websites) > 0 {
+		go r.CacheRepo.CachePopularWebsites(websites)
+	}
+
+	return websites, nil
 }

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
+	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -23,9 +24,9 @@ type metricsRepository struct {
 }
 
 // NewMetricsRepository creates a new metrics repository
-func NewMetricsRepository(db *gorm.DB) MetricsRepository {
+func NewMetricsRepository(db *gorm.DB, redisClient *redis.Client) MetricsRepository {
 	return &metricsRepository{
-		BaseRepository: NewBaseRepository(db),
+		BaseRepository: NewBaseRepository(db, redisClient),
 	}
 }
 
@@ -78,9 +79,9 @@ type recommendationRepository struct {
 }
 
 // NewRecommendationRepository creates a new recommendation repository
-func NewRecommendationRepository(db *gorm.DB) RecommendationRepository {
+func NewRecommendationRepository(db *gorm.DB, redisClient *redis.Client) RecommendationRepository {
 	return &recommendationRepository{
-		BaseRepository: NewBaseRepository(db),
+		BaseRepository: NewBaseRepository(db, redisClient),
 	}
 }
 
@@ -155,9 +156,9 @@ type issueRepository struct {
 }
 
 // NewIssueRepository creates a new issue repository
-func NewIssueRepository(db *gorm.DB) IssueRepository {
+func NewIssueRepository(db *gorm.DB, redisClient *redis.Client) IssueRepository {
 	return &issueRepository{
-		BaseRepository: NewBaseRepository(db),
+		BaseRepository: NewBaseRepository(db, redisClient),
 	}
 }
 

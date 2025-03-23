@@ -2,6 +2,7 @@ package repository
 
 import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
+	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -17,9 +18,9 @@ type contentImprovementRepository struct {
 	*BaseRepository
 }
 
-func NewContentImprovementRepository(db *gorm.DB) ContentImprovementRepository {
+func NewContentImprovementRepository(db *gorm.DB, redisClient *redis.Client) ContentImprovementRepository {
 	return &contentImprovementRepository{
-		BaseRepository: NewBaseRepository(db),
+		BaseRepository: NewBaseRepository(db, redisClient),
 	}
 }
 
