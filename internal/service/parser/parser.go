@@ -1287,7 +1287,6 @@ func detectCMS(data *WebsiteData) map[string]Technology {
 	return cms
 }
 
-// Helper function to get technology signatures (simplified version)
 func getTechnologySignatures() []techSignature {
 	return []techSignature{
 		{

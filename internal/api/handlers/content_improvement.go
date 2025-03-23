@@ -16,7 +16,6 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm"
 )
 
-// ContentImprovementHandler handles requests for content improvements
 type ContentImprovementHandler struct {
 	LLMService         *llm.Service
 	AnalysisRepo       repository.AnalysisRepository
@@ -101,7 +100,6 @@ type CodeSnippetRequest struct {
 // @Security BearerAuth
 // @Router /analysis/{id}/content-improvements [post]
 func (h *ContentImprovementHandler) RequestContentImprovement(c *fiber.Ctx) error {
-	// Get analysis ID from path
 	id := c.Params("id")
 	analysisID, err := uuid.Parse(id)
 	if err != nil {

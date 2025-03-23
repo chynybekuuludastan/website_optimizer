@@ -81,26 +81,19 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 	websites := api.Group("/websites", middleware.JWTMiddleware(cfg))
 	websites.Post("/", middleware.AnalystOrAdmin(), websiteHandler.CreateWebsite)
 	websites.Get("/", middleware.AnalystOrAdmin(), websiteHandler.ListWebsites)
-	websites.Get("/popular", middleware.AnalystOrAdmin(), websiteHandler.GetPopularWebsites)                     // New endpoint
-	websites.Get("/domains/:domain/statistics", middleware.AnalystOrAdmin(), websiteHandler.GetDomainStatistics) // New endpoint
+	websites.Get("/popular", middleware.AnalystOrAdmin(), websiteHandler.GetPopularWebsites)
 	websites.Get("/:id", middleware.AnalystOrAdmin(), websiteHandler.GetWebsite)
 	websites.Delete("/:id", middleware.AnalystOrAdmin(), websiteHandler.DeleteWebsite)
 
 	// Analysis routes
-	// Setup additional analysis routes
 	analysis := api.Group("/analysis")
 	analysis.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.CreateAnalysis)
-	analysis.Get("/latest", middleware.JWTMiddleware(cfg), analysisHandler.GetLatestAnalyses)
-	analysis.Get("/statistics", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.GetAnalyticsStatistics)
 
 	// Protected analysis routes with appropriate authorization
 	protectedAnalysis := analysis.Group("/:id", middleware.JWTMiddleware(cfg))
 	protectedAnalysis.Get("/metrics", middleware.AnalystOrAdmin(), analysisHandler.GetAnalysisMetrics)
 	protectedAnalysis.Get("/metrics/:category", middleware.AnalystOrAdmin(), analysisHandler.GetAnalysisMetricsByCategory)
 	protectedAnalysis.Get("/issues", middleware.AnalystOrAdmin(), analysisHandler.GetAnalysisIssues)
-	protectedAnalysis.Get("/score", analysisHandler.GetOverallScore)
-	protectedAnalysis.Get("/summary/:category", analysisHandler.GetCategorySummary)
-	protectedAnalysis.Patch("/metadata", middleware.AnalystOrAdmin(), analysisHandler.UpdateMetadata)
 
 	// Setup LLM related routes
 	setupLLMRoutes(api, repoFactory, redisClient, cfg)

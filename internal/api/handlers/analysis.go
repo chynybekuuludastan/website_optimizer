@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 
@@ -23,12 +22,10 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
 )
 
-// AnalysisRequest представляет запрос на анализ веб-сайта
 type AnalysisRequest struct {
 	URL string `json:"url" validate:"required,url"`
 }
 
-// AnalysisHandler обрабатывает запросы по анализу веб-сайтов
 type AnalysisHandler struct {
 	AnalysisRepo       repository.AnalysisRepository
 	WebsiteRepo        repository.WebsiteRepository
@@ -122,31 +119,270 @@ func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 	})
 }
 
+// GetAnalysisMetrics returns all metrics for a specific analysis
+// @Summary Get all metrics for an analysis
+// @Description Returns all metrics for a specific analysis
+// @Tags analysis
+// @Accept json
+// @Produce json
+// @Param id path string true "Analysis ID"
+// @Success 200 {object} map[string]interface{} "Analysis metrics"
+// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 404 {object} map[string]interface{} "Analysis not found"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /analysis/{id}/metrics [get]
+func (h *AnalysisHandler) GetAnalysisMetrics(c *fiber.Ctx) error {
+	id := c.Params("id")
+	analysisID, err := uuid.Parse(id)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid analysis ID",
+		})
+	}
+
+	// Check if analysis exists
+	var analysis models.Analysis
+	if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "Analysis not found",
+		})
+	}
+
+	// Create a cache key for this request
+	cacheKey := "analysis_metrics:" + analysisID.String()
+
+	// Try to get from cache if Redis is available
+	if h.RedisClient != nil {
+		var cachedMetrics []map[string]interface{}
+		err := h.RedisClient.Get(cacheKey, &cachedMetrics)
+		if err == nil && cachedMetrics != nil {
+			return c.JSON(fiber.Map{
+				"success": true,
+				"data":    cachedMetrics,
+				"cached":  true,
+			})
+		}
+	}
+
+	// Get all metrics for this analysis
+	metrics, err := h.MetricsRepo.FindByAnalysisID(analysisID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch metrics",
+		})
+	}
+
+	// Process metrics to make them more usable in the frontend
+	formattedMetrics := make([]map[string]interface{}, 0, len(metrics))
+	for _, metric := range metrics {
+		var value map[string]interface{}
+		if err := json.Unmarshal(metric.Value, &value); err != nil {
+			continue
+		}
+
+		formattedMetric := map[string]interface{}{
+			"id":        metric.ID,
+			"category":  metric.Category,
+			"name":      metric.Name,
+			"value":     value,
+			"createdAt": metric.CreatedAt,
+		}
+		formattedMetrics = append(formattedMetrics, formattedMetric)
+	}
+
+	// Cache the result if Redis is available
+	if h.RedisClient != nil {
+		h.RedisClient.Set(cacheKey, formattedMetrics, 30*time.Minute) // Cache for 30 minutes
+	}
+
+	return c.JSON(formattedMetrics)
+}
+
+// GetAnalysisMetricsByCategory returns metrics for a specific category
+// @Summary Get metrics by category
+// @Description Returns metrics for a specific analysis category
+// @Tags analysis
+// @Accept json
+// @Produce json
+// @Param id path string true "Analysis ID"
+// @Param category path string true "Metric category"
+// @Success 200 {object} map[string]interface{} "Metrics for the specified category"
+// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 404 {object} map[string]interface{} "Analysis or category not found"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /analysis/{id}/metrics/{category} [get]
+func (h *AnalysisHandler) GetAnalysisMetricsByCategory(c *fiber.Ctx) error {
+	id := c.Params("id")
+	category := c.Params("category")
+
+	analysisID, err := uuid.Parse(id)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid analysis ID",
+		})
+	}
+
+	// Check if analysis exists
+	var analysis models.Analysis
+	if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "Analysis not found",
+		})
+	}
+
+	// Create a cache key for this request
+	cacheKey := fmt.Sprintf("analysis_metrics:%s:%s", analysisID.String(), category)
+
+	// Try to get from cache if Redis is available
+	if h.RedisClient != nil {
+		var cachedMetrics []map[string]interface{}
+		err := h.RedisClient.Get(cacheKey, &cachedMetrics)
+		if err == nil && cachedMetrics != nil {
+			return c.JSON(fiber.Map{
+				"success": true,
+				"data":    cachedMetrics,
+				"cached":  true,
+			})
+		}
+	}
+
+	// Get metrics for this category
+	metrics, err := h.MetricsRepo.FindByCategory(analysisID, category)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch metrics",
+		})
+	}
+
+	if len(metrics) == 0 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "No metrics found for this category",
+		})
+	}
+
+	// Process metrics to make them more usable in the frontend
+	formattedMetrics := make([]map[string]interface{}, 0, len(metrics))
+	for _, metric := range metrics {
+		var value map[string]interface{}
+		if err := json.Unmarshal(metric.Value, &value); err != nil {
+			continue
+		}
+
+		formattedMetric := map[string]interface{}{
+			"id":        metric.ID,
+			"category":  metric.Category,
+			"name":      metric.Name,
+			"value":     value,
+			"createdAt": metric.CreatedAt,
+		}
+		formattedMetrics = append(formattedMetrics, formattedMetric)
+	}
+
+	// Cache the result if Redis is available
+	if h.RedisClient != nil {
+		h.RedisClient.Set(cacheKey, formattedMetrics, 30*time.Minute) // Cache for 30 minutes
+	}
+
+	return c.JSON(formattedMetrics)
+}
+
+// GetAnalysisIssues returns all issues found during analysis
+// @Summary Get issues for an analysis
+// @Description Returns all issues found during analysis
+// @Tags analysis
+// @Accept json
+// @Produce json
+// @Param id path string true "Analysis ID"
+// @Success 200 {object} map[string]interface{} "Analysis issues"
+// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 404 {object} map[string]interface{} "Analysis not found"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /analysis/{id}/issues [get]
+func (h *AnalysisHandler) GetAnalysisIssues(c *fiber.Ctx) error {
+	id := c.Params("id")
+	analysisID, err := uuid.Parse(id)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid analysis ID",
+		})
+	}
+
+	// Check if analysis exists
+	var analysis models.Analysis
+	if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "Analysis not found",
+		})
+	}
+
+	// Create a cache key for this request
+	cacheKey := "analysis_issues:" + analysisID.String()
+
+	// Try to get from cache if Redis is available
+	if h.RedisClient != nil {
+		var cachedIssues []models.Issue
+		err := h.RedisClient.Get(cacheKey, &cachedIssues)
+		if err == nil && cachedIssues != nil {
+			return c.JSON(fiber.Map{
+				"success": true,
+				"data":    cachedIssues,
+				"cached":  true,
+			})
+		}
+	}
+
+	// Get all issues for this analysis
+	issues, err := h.IssueRepo.FindByAnalysisID(analysisID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch issues",
+		})
+	}
+
+	// Cache the result if Redis is available
+	if h.RedisClient != nil {
+		h.RedisClient.Set(cacheKey, issues, 30*time.Minute) // Cache for 30 minutes
+	}
+
+	return c.JSON(issues)
+}
+
 func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
-	// Update analysis status in database
 	if err := a.AnalysisRepo.UpdateStatus(analysisID, "running"); err != nil {
 		a.updateAnalysisFailed(analysisID, "Error updating status: "+err.Error())
 		return
 	}
 
-	// Ensure timeout is within reasonable limits (max 5 minutes)
 	timeout := a.Config.AnalysisTimeout
 	if timeout <= 0 || timeout > 300 {
 		timeout = 300
 	}
 
-	// Create cancellable context with reasonable timeout
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		time.Duration(timeout)*time.Second,
 	)
 	defer cancel()
 
-	// Store the cancel function in a registry to allow cancellation via WebSocket
 	a.cancelFunctions.Store(analysisID.String(), cancel)
 	defer a.cancelFunctions.Delete(analysisID.String())
 
-	// Parse the website with resource limits and context for cancellation
 	websiteData, err := parser.ParseWebsite(url, parser.ParseOptions{
 		Timeout: timeout,
 	})
@@ -394,12 +630,9 @@ func getSeverityValue(severity string) int {
 	}
 }
 
-// updateAnalysisFailed handles analysis failure
 func (a *AnalysisHandler) updateAnalysisFailed(analysisID uuid.UUID, errorMsg string) {
-	// Create metadata with error
 	metadata := datatypes.JSON([]byte(`{"error": "` + errorMsg + `"}`))
 
-	// Update the database
 	a.AnalysisRepo.Transaction(func(tx *gorm.DB) error {
 		analysis := &models.Analysis{
 			ID:          analysisID,
@@ -408,706 +641,5 @@ func (a *AnalysisHandler) updateAnalysisFailed(analysisID uuid.UUID, errorMsg st
 			Metadata:    metadata,
 		}
 		return tx.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(analysis).Error
-	})
-}
-
-// @Summary Get overall analysis score
-// @Description Calculates and returns the overall score for all analysis categories
-// @Tags analysis
-// @Accept json
-// @Produce json
-// @Param id path string true "Analysis ID"
-// @Success 200 {object} map[string]interface{} "Overall score data"
-// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
-// @Failure 404 {object} map[string]interface{} "Analysis not found"
-// @Failure 500 {object} map[string]interface{} "Internal server error"
-// @Security BearerAuth
-// @Router /analysis/{id}/score [get]
-func (h *AnalysisHandler) GetOverallScore(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	// Create a cache key for this score
-	cacheKey := "analysis_score:" + analysisID.String()
-
-	// Try to get from cache if Redis is available
-	if h.RedisClient != nil {
-		var scoreData map[string]interface{}
-		err := h.RedisClient.Get(cacheKey, &scoreData)
-		if err == nil && scoreData != nil {
-			return c.JSON(fiber.Map{
-				"success": true,
-				"data":    scoreData,
-				"cached":  true,
-			})
-		}
-	}
-
-	// Get all metrics for the analysis
-	metrics, err := h.MetricsRepo.FindByAnalysisID(analysisID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to get metrics",
-		})
-	}
-
-	// Calculate overall score based on all categories
-	totalScore := 0.0
-	count := 0
-	categoryScores := make(map[string]float64)
-
-	for _, metric := range metrics {
-		var result map[string]interface{}
-		if err := json.Unmarshal(metric.Value, &result); err != nil {
-			continue
-		}
-
-		if score, ok := result["score"].(float64); ok {
-			totalScore += score
-			count++
-			categoryScores[metric.Category] = score
-		}
-	}
-
-	// Calculate average score
-	averageScore := 0.0
-	if count > 0 {
-		averageScore = totalScore / float64(count)
-	}
-
-	// Structure the response
-	scoreData := fiber.Map{
-		"overall_score":   averageScore,
-		"category_count":  count,
-		"category_scores": categoryScores,
-	}
-
-	// Cache the result if Redis is available
-	if h.RedisClient != nil {
-		h.RedisClient.Set(cacheKey, scoreData, 30*time.Minute) // Cache for 30 minutes
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    scoreData,
-	})
-}
-
-// @Summary Get analysis category summary
-// @Description Returns a summary of analysis results for a specific category
-// @Tags analysis
-// @Accept json
-// @Produce json
-// @Param id path string true "Analysis ID"
-// @Param category path string true "Analysis category (seo, performance, structure, etc.)"
-// @Success 200 {object} map[string]interface{} "Category summary data"
-// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
-// @Failure 404 {object} map[string]interface{} "Metrics not found"
-// @Failure 500 {object} map[string]interface{} "Internal server error"
-// @Security BearerAuth
-// @Router /analysis/{id}/summary/{category} [get]
-func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
-	id := c.Params("id")
-	category := c.Params("category")
-
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Недопустимый ID анализа",
-		})
-	}
-
-	// First, check if the analysis exists and get its status
-	var analysis models.Analysis
-	err = h.AnalysisRepo.FindByID(analysisID, &analysis)
-	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "Анализ не найден",
-		})
-	}
-
-	// If analysis failed, get error from metadata and return it
-	if analysis.Status == "failed" {
-		var metadata map[string]interface{}
-		if err := json.Unmarshal(analysis.Metadata, &metadata); err == nil {
-			if errMsg, ok := metadata["error"].(string); ok {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-					"success": false,
-					"error":   "Анализ завершился с ошибкой",
-					"details": errMsg,
-					"status":  analysis.Status,
-				})
-			}
-		}
-
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Анализ завершился с ошибкой",
-			"status":  analysis.Status,
-		})
-	}
-
-	// Get metrics for this category
-	metrics, err := h.MetricsRepo.FindByCategory(analysisID, category)
-	if err != nil || len(metrics) == 0 {
-		// Instead of 404, return a more informative response
-		return c.JSON(fiber.Map{
-			"success": true,
-			"data": fiber.Map{
-				"category":              category,
-				"status":                analysis.Status,
-				"metrics":               nil,
-				"issues":                []interface{}{},
-				"recommendations":       []interface{}{},
-				"issues_count":          0,
-				"recommendations_count": 0,
-			},
-		})
-	}
-
-	// Get issues for this category
-	issues, err := h.IssueRepo.FindByCategory(analysisID, category)
-	if err != nil {
-		issues = []models.Issue{}
-	}
-
-	// Get recommendations for this category
-	recommendations, err := h.RecommendationRepo.FindByCategory(analysisID, category)
-	if err != nil {
-		recommendations = []models.Recommendation{}
-	}
-
-	// Создаем оптимизированные структуры для ответа
-	type OptimizedIssue struct {
-		ID          string    `json:"id"`
-		Category    string    `json:"category"`
-		Severity    string    `json:"severity"`
-		Title       string    `json:"title"`
-		Description string    `json:"description,omitempty"`
-		Location    string    `json:"location,omitempty"`
-		CreatedAt   time.Time `json:"created_at"`
-	}
-
-	type OptimizedRecommendation struct {
-		ID          string    `json:"id"`
-		Category    string    `json:"category"`
-		Priority    string    `json:"priority"`
-		Title       string    `json:"title"`
-		Description string    `json:"description,omitempty"`
-		CodeSnippet string    `json:"code_snippet,omitempty"`
-		CreatedAt   time.Time `json:"created_at"`
-	}
-
-	// Преобразуем проблемы в оптимизированный формат
-	optimizedIssues := make([]OptimizedIssue, len(issues))
-	for i, issue := range issues {
-		optimizedIssues[i] = OptimizedIssue{
-			ID:          issue.ID.String(),
-			Category:    issue.Category,
-			Severity:    issue.Severity,
-			Title:       issue.Title,
-			Description: issue.Description,
-			Location:    issue.Location,
-			CreatedAt:   issue.CreatedAt,
-		}
-	}
-
-	// Преобразуем рекомендации в оптимизированный формат
-	optimizedRecommendations := make([]OptimizedRecommendation, len(recommendations))
-	for i, rec := range recommendations {
-		optimizedRecommendations[i] = OptimizedRecommendation{
-			ID:          rec.ID.String(),
-			Category:    rec.Category,
-			Priority:    rec.Priority,
-			Title:       rec.Title,
-			Description: rec.Description,
-			CodeSnippet: rec.CodeSnippet,
-			CreatedAt:   rec.CreatedAt,
-		}
-	}
-
-	// Обрабатываем метрики
-	var result map[string]interface{}
-	if err := json.Unmarshal(metrics[0].Value, &result); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Не удалось обработать метрики: " + err.Error(),
-		})
-	}
-
-	// Формируем финальный оптимизированный ответ
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data": fiber.Map{
-			"metrics":               result,
-			"issues":                optimizedIssues,
-			"recommendations":       optimizedRecommendations,
-			"score":                 result["score"],
-			"issues_count":          len(optimizedIssues),
-			"recommendations_count": len(optimizedRecommendations),
-			"status":                analysis.Status,
-			"website_url":           analysis.Website.URL, // Добавляем полезную информацию
-			"analysis_id":           analysisID.String(),  // ID анализа для дальнейших запросов
-		},
-	})
-}
-
-// @Summary Get user's latest analyses
-// @Description Returns the most recent analyses for the current user
-// @Tags analysis
-// @Accept json
-// @Produce json
-// @Param limit query int false "Number of analyses to return" default(5)
-// @Success 200 {object} map[string]interface{} "Latest analyses"
-// @Failure 401 {object} map[string]interface{} "Unauthorized"
-// @Failure 500 {object} map[string]interface{} "Internal server error"
-// @Security BearerAuth
-// @Router /analysis/latest [get]
-func (h *AnalysisHandler) GetLatestAnalyses(c *fiber.Ctx) error {
-	userID := c.Locals("userID").(uuid.UUID)
-
-	// Parse limit parameter with default value
-	limit := 5
-	if c.Query("limit") != "" {
-		if limitParam, err := strconv.Atoi(c.Query("limit")); err == nil && limitParam > 0 {
-			limit = limitParam
-		}
-	}
-
-	// Use the new repository method with caching
-	analyses, err := h.AnalysisRepo.FindLatestByUserID(userID, limit)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to fetch latest analyses: " + err.Error(),
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    analyses,
-	})
-}
-
-// @Summary Get analysis statistics
-// @Description Returns analysis statistics by date range and status
-// @Tags analysis
-// @Accept json
-// @Produce json
-// @Param start_date query string false "Start date (YYYY-MM-DD)"
-// @Param end_date query string false "End date (YYYY-MM-DD)"
-// @Param status query string false "Analysis status (pending, running, completed, failed)"
-// @Success 200 {object} map[string]interface{} "Analysis statistics"
-// @Failure 401 {object} map[string]interface{} "Unauthorized"
-// @Failure 500 {object} map[string]interface{} "Internal server error"
-// @Security BearerAuth
-// @Router /analysis/statistics [get]
-func (h *AnalysisHandler) GetAnalyticsStatistics(c *fiber.Ctx) error {
-	// Parse date range
-	startDate := time.Now().AddDate(0, -1, 0) // Default: 1 month ago
-	endDate := time.Now()
-
-	if c.Query("start_date") != "" {
-		if parsedDate, err := time.Parse("2006-01-02", c.Query("start_date")); err == nil {
-			startDate = parsedDate
-		}
-	}
-
-	if c.Query("end_date") != "" {
-		if parsedDate, err := time.Parse("2006-01-02", c.Query("end_date")); err == nil {
-			endDate = parsedDate.AddDate(0, 0, 1) // Include the end date
-		}
-	}
-
-	// Get status parameter (optional)
-	status := c.Query("status")
-
-	// Use the new CountByStatusAndDate method
-	count, err := h.AnalysisRepo.CountByStatusAndDate(status, startDate, endDate)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to get analysis statistics: " + err.Error(),
-		})
-	}
-
-	// Build a more comprehensive response with time periods
-	statsResponse := map[string]interface{}{
-		"total":      count,
-		"start_date": startDate.Format("2006-01-02"),
-		"end_date":   endDate.Format("2006-01-02"),
-	}
-
-	if status != "" {
-		statsResponse["status"] = status
-	}
-
-	// If RedisClient is available, we could also cache these statistics
-	if h.RedisClient != nil {
-		cacheKey := fmt.Sprintf("stats:%s:%s:%s",
-			startDate.Format("2006-01-02"),
-			endDate.Format("2006-01-02"),
-			status)
-
-		// Cache for 1 hour
-		h.RedisClient.Set(cacheKey, statsResponse, time.Hour)
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    statsResponse,
-	})
-}
-
-// @Summary Update analysis metadata
-// @Description Updates the metadata for a specific analysis
-// @Tags analysis
-// @Accept json
-// @Produce json
-// @Param id path string true "Analysis ID"
-// @Param metadata body map[string]interface{} true "Metadata to update"
-// @Success 200 {object} map[string]interface{} "Metadata updated successfully"
-// @Failure 400 {object} map[string]interface{} "Invalid request"
-// @Failure 401 {object} map[string]interface{} "Unauthorized"
-// @Failure 404 {object} map[string]interface{} "Analysis not found"
-// @Failure 500 {object} map[string]interface{} "Internal server error"
-// @Security BearerAuth
-// @Router /analysis/{id}/metadata [patch]
-func (h *AnalysisHandler) UpdateMetadata(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	// Parse request body
-	var metadataRequest map[string]interface{}
-	if err := c.BodyParser(&metadataRequest); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid request body: " + err.Error(),
-		})
-	}
-
-	// Verify that the analysis exists
-	var analysis models.Analysis
-	if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "Analysis not found",
-		})
-	}
-
-	// Get current metadata (if any)
-	var currentMetadata map[string]interface{}
-	if analysis.Metadata != nil {
-		if err := json.Unmarshal(analysis.Metadata, &currentMetadata); err == nil {
-			// Merge existing metadata with new metadata
-			for k, v := range metadataRequest {
-				currentMetadata[k] = v
-			}
-		} else {
-			// If we can't unmarshal existing metadata, use only the new metadata
-			currentMetadata = metadataRequest
-		}
-	} else {
-		// No existing metadata
-		currentMetadata = metadataRequest
-	}
-
-	// Convert back to JSON
-	metadataJSON, err := json.Marshal(currentMetadata)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to marshal metadata: " + err.Error(),
-		})
-	}
-
-	// Update analysis metadata using the new repository method
-	if err := h.AnalysisRepo.UpdateMetadata(analysisID, datatypes.JSON(metadataJSON)); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to update metadata: " + err.Error(),
-		})
-	}
-
-	// If caching is available, invalidate any cached analysis data
-	if h.RedisClient != nil {
-		cacheKey := "analysis_score:" + analysisID.String()
-		h.RedisClient.Delete(cacheKey)
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"message": "Metadata updated successfully",
-		"data": fiber.Map{
-			"metadata": currentMetadata,
-		},
-	})
-}
-
-// GetAnalysisMetrics returns all metrics for a specific analysis
-// @Summary Get all metrics for an analysis
-// @Description Returns all metrics for a specific analysis
-// @Tags analysis
-// @Accept json
-// @Produce json
-// @Param id path string true "Analysis ID"
-// @Success 200 {object} map[string]interface{} "Analysis metrics"
-// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
-// @Failure 401 {object} map[string]interface{} "Unauthorized"
-// @Failure 404 {object} map[string]interface{} "Analysis not found"
-// @Failure 500 {object} map[string]interface{} "Internal server error"
-// @Security BearerAuth
-// @Router /analysis/{id}/metrics [get]
-func (h *AnalysisHandler) GetAnalysisMetrics(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	// Check if analysis exists
-	var analysis models.Analysis
-	if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "Analysis not found",
-		})
-	}
-
-	// Create a cache key for this request
-	cacheKey := "analysis_metrics:" + analysisID.String()
-
-	// Try to get from cache if Redis is available
-	if h.RedisClient != nil {
-		var cachedMetrics []map[string]interface{}
-		err := h.RedisClient.Get(cacheKey, &cachedMetrics)
-		if err == nil && cachedMetrics != nil {
-			return c.JSON(fiber.Map{
-				"success": true,
-				"data":    cachedMetrics,
-				"cached":  true,
-			})
-		}
-	}
-
-	// Get all metrics for this analysis
-	metrics, err := h.MetricsRepo.FindByAnalysisID(analysisID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to fetch metrics",
-		})
-	}
-
-	// Process metrics to make them more usable in the frontend
-	formattedMetrics := make([]map[string]interface{}, 0, len(metrics))
-	for _, metric := range metrics {
-		var value map[string]interface{}
-		if err := json.Unmarshal(metric.Value, &value); err != nil {
-			continue
-		}
-
-		formattedMetric := map[string]interface{}{
-			"id":        metric.ID,
-			"category":  metric.Category,
-			"name":      metric.Name,
-			"value":     value,
-			"createdAt": metric.CreatedAt,
-		}
-		formattedMetrics = append(formattedMetrics, formattedMetric)
-	}
-
-	// Cache the result if Redis is available
-	if h.RedisClient != nil {
-		h.RedisClient.Set(cacheKey, formattedMetrics, 30*time.Minute) // Cache for 30 minutes
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    formattedMetrics,
-	})
-}
-
-// GetAnalysisMetricsByCategory returns metrics for a specific category
-// @Summary Get metrics by category
-// @Description Returns metrics for a specific analysis category
-// @Tags analysis
-// @Accept json
-// @Produce json
-// @Param id path string true "Analysis ID"
-// @Param category path string true "Metric category"
-// @Success 200 {object} map[string]interface{} "Metrics for the specified category"
-// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
-// @Failure 401 {object} map[string]interface{} "Unauthorized"
-// @Failure 404 {object} map[string]interface{} "Analysis or category not found"
-// @Failure 500 {object} map[string]interface{} "Internal server error"
-// @Security BearerAuth
-// @Router /analysis/{id}/metrics/{category} [get]
-func (h *AnalysisHandler) GetAnalysisMetricsByCategory(c *fiber.Ctx) error {
-	id := c.Params("id")
-	category := c.Params("category")
-
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	// Check if analysis exists
-	var analysis models.Analysis
-	if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "Analysis not found",
-		})
-	}
-
-	// Create a cache key for this request
-	cacheKey := fmt.Sprintf("analysis_metrics:%s:%s", analysisID.String(), category)
-
-	// Try to get from cache if Redis is available
-	if h.RedisClient != nil {
-		var cachedMetrics []map[string]interface{}
-		err := h.RedisClient.Get(cacheKey, &cachedMetrics)
-		if err == nil && cachedMetrics != nil {
-			return c.JSON(fiber.Map{
-				"success": true,
-				"data":    cachedMetrics,
-				"cached":  true,
-			})
-		}
-	}
-
-	// Get metrics for this category
-	metrics, err := h.MetricsRepo.FindByCategory(analysisID, category)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to fetch metrics",
-		})
-	}
-
-	if len(metrics) == 0 {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "No metrics found for this category",
-		})
-	}
-
-	// Process metrics to make them more usable in the frontend
-	formattedMetrics := make([]map[string]interface{}, 0, len(metrics))
-	for _, metric := range metrics {
-		var value map[string]interface{}
-		if err := json.Unmarshal(metric.Value, &value); err != nil {
-			continue
-		}
-
-		formattedMetric := map[string]interface{}{
-			"id":        metric.ID,
-			"category":  metric.Category,
-			"name":      metric.Name,
-			"value":     value,
-			"createdAt": metric.CreatedAt,
-		}
-		formattedMetrics = append(formattedMetrics, formattedMetric)
-	}
-
-	// Cache the result if Redis is available
-	if h.RedisClient != nil {
-		h.RedisClient.Set(cacheKey, formattedMetrics, 30*time.Minute) // Cache for 30 minutes
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    formattedMetrics,
-	})
-}
-
-// GetAnalysisIssues returns all issues found during analysis
-// @Summary Get issues for an analysis
-// @Description Returns all issues found during analysis
-// @Tags analysis
-// @Accept json
-// @Produce json
-// @Param id path string true "Analysis ID"
-// @Success 200 {object} map[string]interface{} "Analysis issues"
-// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
-// @Failure 401 {object} map[string]interface{} "Unauthorized"
-// @Failure 404 {object} map[string]interface{} "Analysis not found"
-// @Failure 500 {object} map[string]interface{} "Internal server error"
-// @Security BearerAuth
-// @Router /analysis/{id}/issues [get]
-func (h *AnalysisHandler) GetAnalysisIssues(c *fiber.Ctx) error {
-	id := c.Params("id")
-	analysisID, err := uuid.Parse(id)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid analysis ID",
-		})
-	}
-
-	// Check if analysis exists
-	var analysis models.Analysis
-	if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   "Analysis not found",
-		})
-	}
-
-	// Create a cache key for this request
-	cacheKey := "analysis_issues:" + analysisID.String()
-
-	// Try to get from cache if Redis is available
-	if h.RedisClient != nil {
-		var cachedIssues []models.Issue
-		err := h.RedisClient.Get(cacheKey, &cachedIssues)
-		if err == nil && cachedIssues != nil {
-			return c.JSON(fiber.Map{
-				"success": true,
-				"data":    cachedIssues,
-				"cached":  true,
-			})
-		}
-	}
-
-	// Get all issues for this analysis
-	issues, err := h.IssueRepo.FindByAnalysisID(analysisID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to fetch issues",
-		})
-	}
-
-	// Cache the result if Redis is available
-	if h.RedisClient != nil {
-		h.RedisClient.Set(cacheKey, issues, 30*time.Minute) // Cache for 30 minutes
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    issues,
 	})
 }
