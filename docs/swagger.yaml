@@ -283,6 +283,57 @@ paths:
       summary: Cancel content generation
       tags:
       - content-improvements
+  /analysis/{id}/metadata:
+    patch:
+      consumes:
+      - application/json
+      description: Updates the metadata for a specific analysis
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Metadata to update
+        in: body
+        name: metadata
+        required: true
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Metadata updated successfully
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid request
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Analysis not found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Update analysis metadata
+      tags:
+      - analysis
   /analysis/{id}/score:
     get:
       consumes:
@@ -364,6 +415,81 @@ paths:
       security:
       - BearerAuth: []
       summary: Get analysis category summary
+      tags:
+      - analysis
+  /analysis/latest:
+    get:
+      consumes:
+      - application/json
+      description: Returns the most recent analyses for the current user
+      parameters:
+      - default: 5
+        description: Number of analyses to return
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Latest analyses
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get user's latest analyses
+      tags:
+      - analysis
+  /analysis/statistics:
+    get:
+      consumes:
+      - application/json
+      description: Returns analysis statistics by date range and status
+      parameters:
+      - description: Start date (YYYY-MM-DD)
+        in: query
+        name: start_date
+        type: string
+      - description: End date (YYYY-MM-DD)
+        in: query
+        name: end_date
+        type: string
+      - description: Analysis status (pending, running, completed, failed)
+        in: query
+        name: status
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Analysis statistics
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get analysis statistics
       tags:
       - analysis
   /auth/login:
@@ -524,6 +650,21 @@ paths:
       consumes:
       - application/json
       description: Get a list of all websites in the system
+      parameters:
+      - default: 1
+        description: Page number
+        in: query
+        name: page
+        type: integer
+      - default: 10
+        description: Number of items per page
+        in: query
+        name: per_page
+        type: integer
+      - description: Search query
+        in: query
+        name: search
+        type: string
       produces:
       - application/json
       responses:
@@ -586,13 +727,13 @@ paths:
       summary: Create a new website
       tags:
       - websites
-  /ws/analysis/{id}:
-    get:
+  /websites/{id}:
+    delete:
       consumes:
       - application/json
-      description: WebSocket endpoint for receiving real-time analysis status updates
+      description: Delete a website by its ID
       parameters:
-      - description: Analysis ID
+      - description: Website ID
         in: path
         name: id
         required: true
@@ -600,21 +741,142 @@ paths:
       produces:
       - application/json
       responses:
-        "101":
-          description: Switching protocols to WebSocket
+        "200":
+          description: Website deleted successfully
+          schema:
+            additionalProperties: true
+            type: object
         "400":
-          description: Invalid analysis ID
+          description: Invalid website ID
           schema:
             additionalProperties: true
             type: object
         "404":
-          description: Analysis not found
+          description: Website not found
           schema:
             additionalProperties: true
             type: object
-      summary: Real-time analysis updates
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Delete a website
       tags:
-      - analysis
+      - websites
+    get:
+      consumes:
+      - application/json
+      description: Get detailed information about a specific website
+      parameters:
+      - description: Website ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Website details
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid website ID
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Website not found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get website details
+      tags:
+      - websites
+  /websites/domains/{domain}/statistics:
+    get:
+      consumes:
+      - application/json
+      description: Returns statistics for a specific domain
+      parameters:
+      - description: Domain name
+        in: path
+        name: domain
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Domain statistics
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid domain
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get domain statistics
+      tags:
+      - websites
+  /websites/popular:
+    get:
+      consumes:
+      - application/json
+      description: Returns the most frequently analyzed websites
+      parameters:
+      - default: 10
+        description: Number of websites to return
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Popular websites
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get popular websites
+      tags:
+      - websites
 schemes:
 - http
 - https

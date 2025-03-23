@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -21,8 +21,6 @@ import (
 	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/analyzer"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
-
-	ws "github.com/chynybekuuludastan/website_optimizer/internal/api/websocket"
 )
 
 // AnalysisHandler обрабатывает запросы по анализу веб-сайтов
@@ -34,7 +32,6 @@ type AnalysisHandler struct {
 	RecommendationRepo repository.RecommendationRepository
 	RedisClient        *database.RedisClient
 	Config             *config.Config
-	WebSocketHub       *ws.Hub
 	cancelFunctions    sync.Map
 }
 
@@ -42,7 +39,6 @@ func NewAnalysisHandler(
 	repoFactory *repository.Factory,
 	redisClient *database.RedisClient,
 	cfg *config.Config,
-	wsHub *ws.Hub, // Add this parameter
 ) *AnalysisHandler {
 	return &AnalysisHandler{
 		AnalysisRepo:       repoFactory.AnalysisRepository,
@@ -52,7 +48,6 @@ func NewAnalysisHandler(
 		RecommendationRepo: repoFactory.RecommendationRepository,
 		RedisClient:        redisClient,
 		Config:             cfg,
-		WebSocketHub:       wsHub, // Initialize the field
 		cancelFunctions:    sync.Map{},
 	}
 }
@@ -123,18 +118,6 @@ func (h *AnalysisHandler) CreateAnalysis(c *fiber.Ctx) error {
 }
 
 func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
-	// Report analysis started
-	a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeAnalysisStarted,
-		Status:    "started",
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"analysis_id": analysisID.String(),
-			"url":         url,
-			"message":     "Analysis started",
-		},
-	})
-
 	// Update analysis status in database
 	if err := a.AnalysisRepo.UpdateStatus(analysisID, "running"); err != nil {
 		a.updateAnalysisFailed(analysisID, "Error updating status: "+err.Error())
@@ -158,20 +141,6 @@ func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 	a.cancelFunctions.Store(analysisID.String(), cancel)
 	defer a.cancelFunctions.Delete(analysisID.String())
 
-	// Report parsing started
-	a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeAnalysisProgress,
-		Status:    "parsing",
-		Progress:  5.0,
-		Category:  ws.CategoryAll,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"stage":    "parsing",
-			"message":  "Parsing website content",
-			"progress": 5.0,
-		},
-	})
-
 	// Parse the website with resource limits and context for cancellation
 	websiteData, err := parser.ParseWebsite(url, parser.ParseOptions{
 		Timeout: timeout,
@@ -190,28 +159,6 @@ func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 	default:
 		// Continue with analysis
 	}
-
-	// Report parsing completed and analysis beginning
-	a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeAnalysisProgress,
-		Status:    "analyzing",
-		Progress:  15.0,
-		Category:  ws.CategoryAll,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"stage":    "parsing_completed",
-			"message":  "Website parsed successfully, starting analysis",
-			"progress": 15.0,
-			"details": map[string]interface{}{
-				"title":       websiteData.Title,
-				"description": websiteData.Description,
-				"images":      len(websiteData.Images),
-				"links":       len(websiteData.Links),
-				"scripts":     len(websiteData.Scripts),
-				"styles":      len(websiteData.Styles),
-			},
-		},
-	})
 
 	// Update website information
 	website := &models.Website{
@@ -246,48 +193,6 @@ func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 		}
 	})
 
-	// Start progress reporting goroutine
-	go func() {
-		defer close(progressChan)
-		for update := range progressChan {
-			// Check if context is done before sending progress
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				// Calculate overall progress (15-85% range for analyzers)
-				progress := 15.0 + (update.Progress * 70.0 / 100.0)
-
-				// Send more compact progress updates
-				a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-					Type:      ws.TypeAnalysisProgress,
-					Status:    "analyzing",
-					Progress:  progress,
-					Category:  ws.AnalysisCategory(update.AnalyzerType),
-					Timestamp: time.Now(),
-					Data: map[string]interface{}{
-						"analyzer":         update.AnalyzerType,
-						"overall_progress": progress,
-						"message":          update.Message,
-					},
-				})
-
-				// Only send partial results when significant
-				if update.PartialResults != nil && len(update.PartialResults) > 0 {
-					a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-						Type:      ws.TypePartialResults,
-						Category:  ws.AnalysisCategory(update.AnalyzerType),
-						Timestamp: time.Now(),
-						Data: map[string]interface{}{
-							"analyzer": update.AnalyzerType,
-							"results":  update.PartialResults,
-						},
-					})
-				}
-			}
-		}
-	}()
-
 	// Run the analyzers with timeout
 	results, err := manager.RunAllAnalyzers(ctx, websiteData)
 
@@ -295,17 +200,6 @@ func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 	select {
 	case <-ctx.Done():
 		if ctx.Err() == context.Canceled {
-			// Analysis was cancelled
-			a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-				Type:      ws.TypeAnalysisCompleted,
-				Status:    "cancelled",
-				Progress:  100.0,
-				Category:  ws.CategoryAll,
-				Timestamp: time.Now(),
-				Data: map[string]interface{}{
-					"message": "Analysis was cancelled",
-				},
-			})
 			a.AnalysisRepo.UpdateStatus(analysisID, "cancelled")
 			return
 		} else if ctx.Err() == context.DeadlineExceeded {
@@ -321,20 +215,6 @@ func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 		a.updateAnalysisFailed(analysisID, "Analysis error: "+err.Error())
 		return
 	}
-
-	// Report that we're saving results
-	a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeAnalysisProgress,
-		Status:    "saving",
-		Progress:  85.0,
-		Category:  ws.CategoryAll,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"stage":    "saving_results",
-			"message":  "Saving analysis results",
-			"progress": 85.0,
-		},
-	})
 
 	// Split database operations into separate transactions to avoid long locks
 	// First transaction: save metrics
@@ -363,21 +243,6 @@ func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 			}
 			totalMetrics++
 
-			// Report progress every 2 metrics
-			if totalMetrics%2 == 0 {
-				progress := 85.0 + (float64(totalMetrics) / float64(len(results)) * 5.0)
-				a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-					Type:      ws.TypeAnalysisProgress,
-					Status:    "saving",
-					Progress:  progress,
-					Category:  ws.CategoryAll,
-					Timestamp: time.Now(),
-					Data: map[string]interface{}{
-						"stage":    "saving_metrics",
-						"progress": progress,
-					},
-				})
-			}
 		}
 		return nil
 	})
@@ -386,20 +251,6 @@ func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 		a.updateAnalysisFailed(analysisID, "Error saving metrics: "+err.Error())
 		return
 	}
-
-	// Second transaction: save critical issues (max 10 per category)
-	a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeAnalysisProgress,
-		Status:    "saving",
-		Progress:  90.0,
-		Category:  ws.CategoryAll,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"stage":    "saving_issues",
-			"message":  "Saving identified issues",
-			"progress": 90.0,
-		},
-	})
 
 	err = a.AnalysisRepo.Transaction(func(tx *gorm.DB) error {
 		allIssues := manager.GetAllIssues()
@@ -448,20 +299,6 @@ func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 		a.updateAnalysisFailed(analysisID, "Error saving issues: "+err.Error())
 		return
 	}
-
-	// Third transaction: save recommendations (up to 20 total)
-	a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeAnalysisProgress,
-		Status:    "saving",
-		Progress:  95.0,
-		Category:  ws.CategoryAll,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"stage":    "saving_recommendations",
-			"message":  "Saving recommendations",
-			"progress": 95.0,
-		},
-	})
 
 	err = a.AnalysisRepo.Transaction(func(tx *gorm.DB) error {
 		allRecommendations := manager.GetAllRecommendations()
@@ -536,28 +373,6 @@ func (a *AnalysisHandler) runAnalysis(analysisID uuid.UUID, url string) {
 			scoreCount++
 		}
 	}
-
-	overallScore := 0.0
-	if scoreCount > 0 {
-		overallScore = totalScore / float64(scoreCount)
-	}
-
-	startTime := time.Now()
-
-	// Send completion message
-	a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeAnalysisCompleted,
-		Status:    "completed",
-		Progress:  100.0,
-		Category:  ws.CategoryAll,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"message":        "Analysis completed successfully",
-			"overall_score":  overallScore,
-			"analyzer_count": scoreCount,
-			"duration_ms":    time.Since(startTime).Milliseconds(),
-		},
-	})
 }
 
 // Helper function to get numeric value for severity to sort issues
@@ -589,18 +404,6 @@ func (a *AnalysisHandler) updateAnalysisFailed(analysisID uuid.UUID, errorMsg st
 		}
 		return tx.Model(&models.Analysis{}).Where("id = ?", analysisID).Updates(analysis).Error
 	})
-
-	// Send error notification via WebSocket
-	a.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeAnalysisError,
-		Status:    "failed",
-		Category:  ws.CategoryAll,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"message": "Analysis failed",
-			"error":   errorMsg,
-		},
-	})
 }
 
 // @Summary Get overall analysis score
@@ -621,22 +424,39 @@ func (h *AnalysisHandler) GetOverallScore(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,
-			"error":   "Недопустимый ID анализа",
+			"error":   "Invalid analysis ID",
 		})
 	}
 
-	// Получаем все метрики для анализа
+	// Create a cache key for this score
+	cacheKey := "analysis_score:" + analysisID.String()
+
+	// Try to get from cache if Redis is available
+	if h.RedisClient != nil {
+		var scoreData map[string]interface{}
+		err := h.RedisClient.Get(cacheKey, &scoreData)
+		if err == nil && scoreData != nil {
+			return c.JSON(fiber.Map{
+				"success": true,
+				"data":    scoreData,
+				"cached":  true,
+			})
+		}
+	}
+
+	// Get all metrics for the analysis
 	metrics, err := h.MetricsRepo.FindByAnalysisID(analysisID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   "Не удалось получить метрики",
+			"error":   "Failed to get metrics",
 		})
 	}
 
-	// Вычисляем общий балл на основе всех категорий
+	// Calculate overall score based on all categories
 	totalScore := 0.0
 	count := 0
+	categoryScores := make(map[string]float64)
 
 	for _, metric := range metrics {
 		var result map[string]interface{}
@@ -647,21 +467,31 @@ func (h *AnalysisHandler) GetOverallScore(c *fiber.Ctx) error {
 		if score, ok := result["score"].(float64); ok {
 			totalScore += score
 			count++
+			categoryScores[metric.Category] = score
 		}
 	}
 
-	// Вычисляем средний балл
+	// Calculate average score
 	averageScore := 0.0
 	if count > 0 {
 		averageScore = totalScore / float64(count)
 	}
 
+	// Structure the response
+	scoreData := fiber.Map{
+		"overall_score":   averageScore,
+		"category_count":  count,
+		"category_scores": categoryScores,
+	}
+
+	// Cache the result if Redis is available
+	if h.RedisClient != nil {
+		h.RedisClient.Set(cacheKey, scoreData, 30*time.Minute) // Cache for 30 minutes
+	}
+
 	return c.JSON(fiber.Map{
 		"success": true,
-		"data": fiber.Map{
-			"overall_score":  averageScore,
-			"category_count": count,
-		},
+		"data":    scoreData,
 	})
 }
 
@@ -826,199 +656,202 @@ func (h *AnalysisHandler) GetCategorySummary(c *fiber.Ctx) error {
 	})
 }
 
-// @Summary Real-time analysis updates
-// @Description WebSocket endpoint for receiving real-time analysis status updates
+// @Summary Get user's latest analyses
+// @Description Returns the most recent analyses for the current user
+// @Tags analysis
+// @Accept json
+// @Produce json
+// @Param limit query int false "Number of analyses to return" default(5)
+// @Success 200 {object} map[string]interface{} "Latest analyses"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /analysis/latest [get]
+func (h *AnalysisHandler) GetLatestAnalyses(c *fiber.Ctx) error {
+	userID := c.Locals("userID").(uuid.UUID)
+
+	// Parse limit parameter with default value
+	limit := 5
+	if c.Query("limit") != "" {
+		if limitParam, err := strconv.Atoi(c.Query("limit")); err == nil && limitParam > 0 {
+			limit = limitParam
+		}
+	}
+
+	// Use the new repository method with caching
+	analyses, err := h.AnalysisRepo.FindLatestByUserID(userID, limit)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch latest analyses: " + err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    analyses,
+	})
+}
+
+// @Summary Get analysis statistics
+// @Description Returns analysis statistics by date range and status
+// @Tags analysis
+// @Accept json
+// @Produce json
+// @Param start_date query string false "Start date (YYYY-MM-DD)"
+// @Param end_date query string false "End date (YYYY-MM-DD)"
+// @Param status query string false "Analysis status (pending, running, completed, failed)"
+// @Success 200 {object} map[string]interface{} "Analysis statistics"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /analysis/statistics [get]
+func (h *AnalysisHandler) GetAnalyticsStatistics(c *fiber.Ctx) error {
+	// Parse date range
+	startDate := time.Now().AddDate(0, -1, 0) // Default: 1 month ago
+	endDate := time.Now()
+
+	if c.Query("start_date") != "" {
+		if parsedDate, err := time.Parse("2006-01-02", c.Query("start_date")); err == nil {
+			startDate = parsedDate
+		}
+	}
+
+	if c.Query("end_date") != "" {
+		if parsedDate, err := time.Parse("2006-01-02", c.Query("end_date")); err == nil {
+			endDate = parsedDate.AddDate(0, 0, 1) // Include the end date
+		}
+	}
+
+	// Get status parameter (optional)
+	status := c.Query("status")
+
+	// Use the new CountByStatusAndDate method
+	count, err := h.AnalysisRepo.CountByStatusAndDate(status, startDate, endDate)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to get analysis statistics: " + err.Error(),
+		})
+	}
+
+	// Build a more comprehensive response with time periods
+	statsResponse := map[string]interface{}{
+		"total":      count,
+		"start_date": startDate.Format("2006-01-02"),
+		"end_date":   endDate.Format("2006-01-02"),
+	}
+
+	if status != "" {
+		statsResponse["status"] = status
+	}
+
+	// If RedisClient is available, we could also cache these statistics
+	if h.RedisClient != nil {
+		cacheKey := fmt.Sprintf("stats:%s:%s:%s",
+			startDate.Format("2006-01-02"),
+			endDate.Format("2006-01-02"),
+			status)
+
+		// Cache for 1 hour
+		h.RedisClient.Set(cacheKey, statsResponse, time.Hour)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    statsResponse,
+	})
+}
+
+// @Summary Update analysis metadata
+// @Description Updates the metadata for a specific analysis
 // @Tags analysis
 // @Accept json
 // @Produce json
 // @Param id path string true "Analysis ID"
-// @Success 101 {object} nil "Switching protocols to WebSocket"
-// @Failure 400 {object} map[string]interface{} "Invalid analysis ID"
+// @Param metadata body map[string]interface{} true "Metadata to update"
+// @Success 200 {object} map[string]interface{} "Metadata updated successfully"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 404 {object} map[string]interface{} "Analysis not found"
-// @Router /ws/analysis/{id} [get]
-// HandleWebSocket handles WebSocket connections with improved efficiency and error handling
-func (h *AnalysisHandler) HandleWebSocket(c *websocket.Conn) {
-	// Получаем ID анализа из URL
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /analysis/{id}/metadata [patch]
+func (h *AnalysisHandler) UpdateMetadata(c *fiber.Ctx) error {
 	id := c.Params("id")
 	analysisID, err := uuid.Parse(id)
 	if err != nil {
-		c.WriteJSON(fiber.Map{
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,
-			"error":   "Недопустимый ID анализа",
+			"error":   "Invalid analysis ID",
 		})
-		c.Close()
-		return
 	}
 
-	// Получаем данные анализа
+	// Parse request body
+	var metadataRequest map[string]interface{}
+	if err := c.BodyParser(&metadataRequest); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid request body: " + err.Error(),
+		})
+	}
+
+	// Verify that the analysis exists
 	var analysis models.Analysis
-	err = h.AnalysisRepo.FindByID(analysisID, &analysis)
-	if err != nil {
-		c.WriteJSON(fiber.Map{
+	if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
-			"error":   "Анализ не найден",
+			"error":   "Analysis not found",
 		})
-		c.Close()
-		return
 	}
 
-	// Используем меньший интервал обновлений для снижения нагрузки
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	// Канал для обработки закрытия соединения
-	disconnect := make(chan bool, 1)
-	defer close(disconnect)
-
-	// Контекст с отменой для управления горутинами
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Устанавливаем таймаут чтения и обработчик pong
-	c.SetReadDeadline(time.Now().Add(60 * time.Second))
-	c.SetPongHandler(func(string) error {
-		c.SetReadDeadline(time.Now().Add(60 * time.Second))
-		return nil
-	})
-
-	// Обработка входящих сообщений (включая закрытие)
-	go func() {
-		defer func() {
-			disconnect <- true
-		}()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				messageType, _, err := c.ReadMessage()
-				if err != nil || messageType == websocket.CloseMessage {
-					return
-				}
+	// Get current metadata (if any)
+	var currentMetadata map[string]interface{}
+	if analysis.Metadata != nil {
+		if err := json.Unmarshal(analysis.Metadata, &currentMetadata); err == nil {
+			// Merge existing metadata with new metadata
+			for k, v := range metadataRequest {
+				currentMetadata[k] = v
 			}
+		} else {
+			// If we can't unmarshal existing metadata, use only the new metadata
+			currentMetadata = metadataRequest
 		}
-	}()
-
-	// Отправляем начальное состояние
-	initialStatus := fiber.Map{
-		"success": true,
-		"data": fiber.Map{
-			"id":           analysis.ID,
-			"status":       analysis.Status,
-			"completed_at": analysis.CompletedAt,
-		},
+	} else {
+		// No existing metadata
+		currentMetadata = metadataRequest
 	}
 
-	if err := c.WriteJSON(initialStatus); err != nil {
-		c.Close()
-		return
-	}
-
-	// Track last update time to prevent sending too many updates
-	lastUpdateTime := time.Now()
-	var lastStatus string = analysis.Status
-
-	for {
-		select {
-		case <-ticker.C:
-			now := time.Now()
-			if now.Sub(lastUpdateTime) < 2*time.Second && lastStatus != "completed" && lastStatus != "failed" {
-				continue
-			}
-
-			err = h.AnalysisRepo.FindByID(analysisID, &analysis)
-			if err != nil {
-				c.WriteJSON(fiber.Map{
-					"success": false,
-					"error":   "Ошибка получения анализа",
-				})
-				c.Close()
-				return
-			}
-
-			if analysis.Status != lastStatus {
-				lastUpdateTime = now
-				lastStatus = analysis.Status
-
-				if err := c.WriteJSON(fiber.Map{
-					"success": true,
-					"data": fiber.Map{
-						"id":           analysis.ID,
-						"status":       analysis.Status,
-						"completed_at": analysis.CompletedAt,
-					},
-				}); err != nil {
-					c.Close()
-					return
-				}
-			}
-
-			// Проверяем завершение анализа
-			if analysis.Status == "completed" || analysis.Status == "failed" {
-				// Send final results and close
-				if analysis.Status == "completed" {
-					finalResults := getFinalResults(h, analysisID)
-					c.WriteJSON(finalResults)
-				}
-
-				// Close connection gracefully
-				c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Analysis completed"))
-				c.Close()
-				return
-			}
-
-		case <-disconnect:
-			// Клиент отключился
-			return
-		}
-	}
-}
-
-// Helper function to get final results
-func getFinalResults(h *AnalysisHandler, analysisID uuid.UUID) fiber.Map {
-	// Get all metrics
-	metrics, err := h.MetricsRepo.FindByAnalysisID(analysisID)
+	// Convert back to JSON
+	metadataJSON, err := json.Marshal(currentMetadata)
 	if err != nil {
-		return fiber.Map{
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   "Failed to get metrics",
-		}
+			"error":   "Failed to marshal metadata: " + err.Error(),
+		})
 	}
 
-	totalScore := 0.0
-	count := 0
-	categoryScores := make(map[string]float64)
-
-	for _, metric := range metrics {
-		var result map[string]interface{}
-		if err := json.Unmarshal(metric.Value, &result); err != nil {
-			continue
-		}
-
-		if score, ok := result["score"].(float64); ok {
-			totalScore += score
-			count++
-			categoryScores[metric.Category] = score
-		}
+	// Update analysis metadata using the new repository method
+	if err := h.AnalysisRepo.UpdateMetadata(analysisID, datatypes.JSON(metadataJSON)); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to update metadata: " + err.Error(),
+		})
 	}
 
-	// Calculate average score
-	averageScore := 0.0
-	if count > 0 {
-		averageScore = totalScore / float64(count)
+	// If caching is available, invalidate any cached analysis data
+	if h.RedisClient != nil {
+		cacheKey := "analysis_score:" + analysisID.String()
+		h.RedisClient.Delete(cacheKey)
 	}
 
-	return fiber.Map{
+	return c.JSON(fiber.Map{
 		"success": true,
+		"message": "Metadata updated successfully",
 		"data": fiber.Map{
-			"id":              analysisID,
-			"status":          "completed",
-			"overall_score":   averageScore,
-			"category_count":  count,
-			"category_scores": categoryScores,
+			"metadata": currentMetadata,
 		},
-	}
+	})
 }
 
 // AnalysisRequest представляет запрос на анализ веб-сайта

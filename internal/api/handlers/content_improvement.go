@@ -3,13 +3,14 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 
-	ws "github.com/chynybekuuludastan/website_optimizer/internal/api/websocket"
+	"github.com/chynybekuuludastan/website_optimizer/internal/database"
 	"github.com/chynybekuuludastan/website_optimizer/internal/models"
 	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/llm"
@@ -22,7 +23,7 @@ type ContentImprovementHandler struct {
 	MetricsRepo        repository.MetricsRepository
 	ContentImproveRepo repository.ContentImprovementRepository
 	WebsiteRepo        repository.WebsiteRepository
-	WebSocketHub       *ws.Hub
+	RedisClient        *database.RedisClient // Add Redis client
 	activeRequests     sync.Map
 }
 
@@ -30,7 +31,7 @@ type ContentImprovementHandler struct {
 func NewContentImprovementHandler(
 	llmService *llm.Service,
 	repoFactory *repository.Factory,
-	wsHub *ws.Hub,
+	redisClient *database.RedisClient,
 ) *ContentImprovementHandler {
 	return &ContentImprovementHandler{
 		LLMService:         llmService,
@@ -38,7 +39,7 @@ func NewContentImprovementHandler(
 		MetricsRepo:        repoFactory.MetricsRepository,
 		ContentImproveRepo: repoFactory.ContentImprovementRepository,
 		WebsiteRepo:        repoFactory.WebsiteRepository,
-		WebSocketHub:       wsHub,
+		RedisClient:        redisClient,
 		activeRequests:     sync.Map{},
 	}
 }
@@ -228,47 +229,12 @@ func (h *ContentImprovementHandler) generateContentWithProgressTracking(
 	request *llm.ContentRequest,
 	providerName string,
 ) {
-	// Track start time for performance metrics
-	startTime := time.Now()
-
-	// Send WebSocket notification that generation started
-	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeContentImprovementStarted,
-		Status:    "processing",
-		Progress:  0.0,
-		Category:  ws.CategoryContent,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"analysis_id":     analysisID.String(),
-			"provider":        providerName,
-			"target_audience": request.TargetAudience,
-			"language":        request.Language,
-			"message":         "Content improvement generation started",
-		},
-	})
-
 	// Set timeout for generation
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// Create progress callback for live updates
 	progressCallback := func(progress float64, message string) {
-		// Convert provider progress (0-100) to our progress scale (0-100)
-		// We use 40-90 range for LLM generation, with 0-40 for prep and 90-100 for post-processing
-		adjustedProgress := 40.0 + (progress * 0.5) // Maps 0-100 to 40-90
-
-		h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-			Type:      ws.TypeAnalysisProgress,
-			Status:    "processing",
-			Progress:  adjustedProgress,
-			Category:  ws.CategoryContent,
-			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"stage":    "generating_content",
-				"message":  message,
-				"progress": adjustedProgress,
-			},
-		})
 	}
 
 	// Initial progress update
@@ -281,7 +247,7 @@ func (h *ContentImprovementHandler) generateContentWithProgressTracking(
 		if len(providers) > 0 {
 			providerName = providers[0]
 		} else {
-			h.sendFailureMessage(analysisID, "No LLM providers available", startTime)
+			fmt.Println("No LLM providers available")
 			return
 		}
 	}
@@ -289,59 +255,18 @@ func (h *ContentImprovementHandler) generateContentWithProgressTracking(
 	// Generate content with progress tracking
 	response, err := h.LLMService.GenerateContentWithProgress(ctx, request, providerName, progressCallback)
 	if err != nil {
-		h.sendFailureMessage(analysisID, "Failed to generate content: "+err.Error(), startTime)
+		// Send failure notification
 		return
 	}
-
-	// Send progress update - generating HTML
-	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeAnalysisProgress,
-		Status:    "processing",
-		Progress:  90.0,
-		Category:  ws.CategoryContent,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"stage":      "generating_html",
-			"message":    "Generating HTML from improved content",
-			"progress":   90.0,
-			"provider":   providerName,
-			"model_used": response.ProviderUsed,
-		},
-	})
 
 	// Generate HTML
 	html, err := h.LLMService.GenerateHTML(ctx, request, response, providerName)
 	if err != nil {
 		// Continue without HTML, send warning
-		h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-			Type:      ws.TypeWarning,
-			Category:  ws.CategoryContent,
-			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"analysis_id": analysisID.String(),
-				"warning":     "HTML generation failed but content was created",
-				"error":       err.Error(),
-				"stage":       "html_generation",
-			},
-		})
+		fmt.Println("Failed to generate HTML content:", err)
 	} else {
 		response.HTML = html
 	}
-
-	// Send progress update - saving to database
-	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeAnalysisProgress,
-		Status:    "processing",
-		Progress:  95.0,
-		Category:  ws.CategoryContent,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"stage":    "saving_improvements",
-			"message":  "Saving content improvements to database",
-			"progress": 95.0,
-			"has_html": html != "",
-		},
-	})
 
 	// Prepare database records
 	improvements := []models.ContentImprovement{
@@ -382,63 +307,9 @@ func (h *ContentImprovementHandler) generateContentWithProgressTracking(
 	// Save all improvements
 	err = h.ContentImproveRepo.CreateBatch(improvements)
 	if err != nil {
-		// Send notification of partial success
-		h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-			Type:      ws.TypeContentImprovementFailed,
-			Status:    "completed_with_errors",
-			Category:  ws.CategoryContent,
-			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"analysis_id": analysisID.String(),
-				"error":       "Generated content couldn't be saved: " + err.Error(),
-				"message":     "Content was generated but couldn't be saved",
-				"content": map[string]interface{}{
-					"heading": response.Title,
-					"cta":     response.CTAText,
-					"content": response.Content[0:100] + "...", // Include preview
-				},
-				"duration_ms": time.Since(startTime).Milliseconds(),
-			},
-		})
+		fmt.Println("Failed to save content improvements:", err)
 		return
 	}
-
-	// Send WebSocket notification that generation is complete with detailed info
-	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeContentImprovementCompleted,
-		Status:    "completed",
-		Progress:  100.0,
-		Category:  ws.CategoryContent,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"analysis_id":   analysisID.String(),
-			"provider_used": response.ProviderUsed,
-			"cached":        response.CachedResult,
-			"has_html":      response.HTML != "",
-			"duration_ms":   time.Since(startTime).Milliseconds(),
-			"improvements": map[string]string{
-				"heading": response.Title,
-				"cta":     response.CTAText,
-				"content": response.Content,
-			},
-		},
-	})
-}
-
-// sendFailureMessage sends a standardized failure message via WebSocket
-func (h *ContentImprovementHandler) sendFailureMessage(analysisID uuid.UUID, errorMsg string, startTime time.Time) {
-	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeContentImprovementFailed,
-		Status:    "failed",
-		Category:  ws.CategoryContent,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"analysis_id": analysisID.String(),
-			"error":       errorMsg,
-			"message":     "Failed to generate content improvement",
-			"duration_ms": time.Since(startTime).Milliseconds(),
-		},
-	})
 }
 
 // @Summary Get content improvements for an analysis
@@ -465,6 +336,28 @@ func (h *ContentImprovementHandler) GetContentImprovements(c *fiber.Ctx) error {
 		})
 	}
 
+	// Create a cache key
+	cacheKey := "content_improvements:" + analysisID.String()
+
+	// Try to get from cache if Redis is available
+	if h.RedisClient != nil {
+		var cachedResponse map[string]interface{}
+		err := h.RedisClient.Get(cacheKey, &cachedResponse)
+		if err == nil && cachedResponse != nil {
+			return c.JSON(fiber.Map{
+				"success": true,
+				"data":    cachedResponse,
+				"cached":  true,
+			})
+		}
+	}
+
+	// Check generation status
+	generationStatus := "not_generated"
+	if _, exists := h.activeRequests.Load(analysisID.String()); exists {
+		generationStatus = "in_progress"
+	}
+
 	// Get content improvements for this analysis
 	improvements, err := h.ContentImproveRepo.FindByAnalysisID(analysisID)
 	if err != nil {
@@ -474,11 +367,7 @@ func (h *ContentImprovementHandler) GetContentImprovements(c *fiber.Ctx) error {
 		})
 	}
 
-	// Check generation status
-	generationStatus := "not_generated"
-	if _, exists := h.activeRequests.Load(analysisID.String()); exists {
-		generationStatus = "in_progress"
-	} else if len(improvements) > 0 {
+	if len(improvements) > 0 {
 		generationStatus = "completed"
 	}
 
@@ -493,12 +382,19 @@ func (h *ContentImprovementHandler) GetContentImprovements(c *fiber.Ctx) error {
 		}
 
 		// Analysis exists but no improvements yet
+		noImprovementsResponse := fiber.Map{
+			"improvements": []interface{}{},
+			"status":       generationStatus,
+		}
+
+		// Cache this response briefly
+		if h.RedisClient != nil {
+			h.RedisClient.Set(cacheKey, noImprovementsResponse, 1*time.Minute) // Short cache - only 1 minute
+		}
+
 		return c.JSON(fiber.Map{
 			"success": true,
-			"data": fiber.Map{
-				"improvements": []interface{}{},
-				"status":       generationStatus,
-			},
+			"data":    noImprovementsResponse,
 		})
 	}
 
@@ -508,14 +404,21 @@ func (h *ContentImprovementHandler) GetContentImprovements(c *fiber.Ctx) error {
 		response[improvement.ElementType] = improvement.ImprovedContent
 	}
 
+	responseData := fiber.Map{
+		"improvements": response,
+		"status":       generationStatus,
+		"model":        improvements[0].LLMModel,
+		"created_at":   improvements[0].CreatedAt,
+	}
+
+	// Cache the response for a longer time since content is completed
+	if h.RedisClient != nil && generationStatus == "completed" {
+		h.RedisClient.Set(cacheKey, responseData, 1*time.Hour) // Cache for 1 hour
+	}
+
 	return c.JSON(fiber.Map{
 		"success": true,
-		"data": fiber.Map{
-			"improvements": response,
-			"status":       generationStatus,
-			"model":        improvements[0].LLMModel,
-			"created_at":   improvements[0].CreatedAt,
-		},
+		"data":    responseData,
 	})
 }
 
@@ -590,18 +493,6 @@ func (h *ContentImprovementHandler) CancelContentGeneration(c *fiber.Ctx) error 
 
 	// Remove from active requests (the actual cancellation is handled by context)
 	h.activeRequests.Delete(analysisID.String())
-
-	// Send cancellation notification
-	h.WebSocketHub.BroadcastToAnalysis(analysisID, ws.Message{
-		Type:      ws.TypeContentImprovementFailed,
-		Status:    "cancelled",
-		Category:  ws.CategoryContent,
-		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"analysis_id": analysisID.String(),
-			"message":     "Content generation was cancelled by user",
-		},
-	})
 
 	return c.JSON(fiber.Map{
 		"success": true,

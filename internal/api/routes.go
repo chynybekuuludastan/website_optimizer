@@ -5,12 +5,10 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/swagger"
-	"github.com/gofiber/websocket/v2"
 	"golang.org/x/time/rate"
 
 	"github.com/chynybekuuludastan/website_optimizer/internal/api/handlers"
 	"github.com/chynybekuuludastan/website_optimizer/internal/api/middleware"
-	ws "github.com/chynybekuuludastan/website_optimizer/internal/api/websocket"
 	"github.com/chynybekuuludastan/website_optimizer/internal/config"
 	"github.com/chynybekuuludastan/website_optimizer/internal/database"
 	"github.com/chynybekuuludastan/website_optimizer/internal/repository"
@@ -35,14 +33,9 @@ import (
 // @name Authorization
 // @description Type "Bearer" followed by a space and JWT token
 
-// SetupRoutes configures all API routes
 func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *database.RedisClient, cfg *config.Config) {
 	// Initialize repository factory
-	repoFactory := repository.NewRepositoryFactory(db.DB)
-
-	// Initialize WebSocket hub
-	hub := ws.NewHub(repoFactory.UserRepository)
-	go hub.Run()
+	repoFactory := repository.NewRepositoryFactory(db.DB, redisClient.Client)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(repoFactory.UserRepository, redisClient, cfg)
@@ -53,11 +46,9 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 		redisClient,
 		cfg,
 	)
-	analysisHandler := handlers.NewAnalysisHandler(repoFactory, redisClient, cfg, hub)
-	wsHandler := handlers.NewWebSocketHandler(hub, repoFactory.AnalysisRepository, repoFactory.UserRepository, cfg)
+	analysisHandler := handlers.NewAnalysisHandler(repoFactory, redisClient, cfg)
 
 	// Serve static files
-	app.Get("/ws-test", wsHandler.ServePage)
 	app.Static("/static", "./static")
 
 	// API group
@@ -86,41 +77,36 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 	users.Delete("/:id", middleware.Self("id"), userHandler.DeleteUser)
 	users.Patch("/:id/role", middleware.AdminOnly(), userHandler.UpdateRole)
 
-	// Website routes
+	// internal/api/routes.go
 	websites := api.Group("/websites", middleware.JWTMiddleware(cfg))
 	websites.Post("/", middleware.AnalystOrAdmin(), websiteHandler.CreateWebsite)
 	websites.Get("/", middleware.AnalystOrAdmin(), websiteHandler.ListWebsites)
+	websites.Get("/popular", middleware.AnalystOrAdmin(), websiteHandler.GetPopularWebsites)                     // New endpoint
+	websites.Get("/domains/:domain/statistics", middleware.AnalystOrAdmin(), websiteHandler.GetDomainStatistics) // New endpoint
 	websites.Get("/:id", middleware.AnalystOrAdmin(), websiteHandler.GetWebsite)
 	websites.Delete("/:id", middleware.AnalystOrAdmin(), websiteHandler.DeleteWebsite)
 
 	// Analysis routes
 	analysis := api.Group("/analysis")
 	analysis.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.CreateAnalysis)
+	analysis.Get("/latest", middleware.JWTMiddleware(cfg), analysisHandler.GetLatestAnalyses)
+	analysis.Get("/statistics", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.GetAnalyticsStatistics)
 
 	// Protected analysis routes
 	protectedAnalysis := analysis.Group("/:id", middleware.JWTMiddleware(cfg))
 	protectedAnalysis.Get("/score", analysisHandler.GetOverallScore)
 	protectedAnalysis.Get("/summary/:category", analysisHandler.GetCategorySummary)
+	protectedAnalysis.Patch("/metadata", middleware.AnalystOrAdmin(), analysisHandler.UpdateMetadata)
 
 	// Setup LLM related routes
-	setupLLMRoutes(api, repoFactory, redisClient, hub, cfg)
-
-	// WebSocket endpoint for real-time analysis updates
-	app.Use("/ws", func(c *fiber.Ctx) error {
-		if websocket.IsWebSocketUpgrade(c) {
-			return c.Next()
-		}
-		return c.SendStatus(fiber.StatusUpgradeRequired)
-	})
-
-	app.Get("/ws/analysis/:id", websocket.New(wsHandler.HandleAnalysisWebSocket))
+	setupLLMRoutes(api, repoFactory, redisClient, cfg)
 
 	// Set up Swagger documentation endpoint
 	app.Get("/swagger/*", swagger.HandlerDefault)
 }
 
 // Setup LLM related routes
-func setupLLMRoutes(apiGroup fiber.Router, repoFactory *repository.Factory, redisClient *database.RedisClient, hub *ws.Hub, cfg *config.Config) {
+func setupLLMRoutes(apiGroup fiber.Router, repoFactory *repository.Factory, redisClient *database.RedisClient, cfg *config.Config) {
 	// Initialize LLM service with the internal redis.Client
 	llmService := llm.NewService(llm.ServiceOptions{
 		DefaultProvider: "gemini",
@@ -148,7 +134,7 @@ func setupLLMRoutes(apiGroup fiber.Router, repoFactory *repository.Factory, redi
 	}
 
 	// Initialize content improvement handler
-	contentHandler := handlers.NewContentImprovementHandler(llmService, repoFactory, hub)
+	contentHandler := handlers.NewContentImprovementHandler(llmService, repoFactory, redisClient)
 
 	// Set up routes for content improvements
 	contentRoutes := apiGroup.Group("/analysis/:id/content-improvements")

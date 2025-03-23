@@ -1,4 +1,3 @@
-// internal/api/handlers/website.go
 package handlers
 
 import (
@@ -113,6 +112,9 @@ func (h *WebsiteHandler) CreateWebsite(c *fiber.Ctx) error {
 // @Tags websites
 // @Accept json
 // @Produce json
+// @Param page query int false "Page number" default(1)
+// @Param per_page query int false "Number of items per page" default(10)
+// @Param search query string false "Search query"
 // @Success 200 {object} map[string]interface{} "Websites list"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 500 {object} map[string]interface{} "Internal server error"
@@ -169,7 +171,18 @@ func (h *WebsiteHandler) ListWebsites(c *fiber.Ctx) error {
 	})
 }
 
-// GetWebsite returns information about a specific website
+// @Summary Get website details
+// @Description Get detailed information about a specific website
+// @Tags websites
+// @Accept json
+// @Produce json
+// @Param id path string true "Website ID"
+// @Success 200 {object} map[string]interface{} "Website details"
+// @Failure 400 {object} map[string]interface{} "Invalid website ID"
+// @Failure 404 {object} map[string]interface{} "Website not found"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /websites/{id} [get]
 func (h *WebsiteHandler) GetWebsite(c *fiber.Ctx) error {
 	id := c.Params("id")
 	websiteID, err := uuid.Parse(id)
@@ -204,7 +217,18 @@ func (h *WebsiteHandler) GetWebsite(c *fiber.Ctx) error {
 	})
 }
 
-// DeleteWebsite deletes a website
+// @Summary Delete a website
+// @Description Delete a website by its ID
+// @Tags websites
+// @Accept json
+// @Produce json
+// @Param id path string true "Website ID"
+// @Success 200 {object} map[string]interface{} "Website deleted successfully"
+// @Failure 400 {object} map[string]interface{} "Invalid website ID"
+// @Failure 404 {object} map[string]interface{} "Website not found"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /websites/{id} [delete]
 func (h *WebsiteHandler) DeleteWebsite(c *fiber.Ctx) error {
 	id := c.Params("id")
 	websiteID, err := uuid.Parse(id)
@@ -250,5 +274,76 @@ func (h *WebsiteHandler) DeleteWebsite(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": "Website deleted successfully",
+	})
+}
+
+// @Summary Get domain statistics
+// @Description Returns statistics for a specific domain
+// @Tags websites
+// @Accept json
+// @Produce json
+// @Param domain path string true "Domain name"
+// @Success 200 {object} map[string]interface{} "Domain statistics"
+// @Failure 400 {object} map[string]interface{} "Invalid domain"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /websites/domains/{domain}/statistics [get]
+func (h *WebsiteHandler) GetDomainStatistics(c *fiber.Ctx) error {
+	domain := c.Params("domain")
+	if domain == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Domain parameter is required",
+		})
+	}
+
+	// Use the new repository method that leverages caching
+	stats, err := h.WebsiteRepo.FindDomainStatistics(domain)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch domain statistics: " + err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    stats,
+	})
+}
+
+// @Summary Get popular websites
+// @Description Returns the most frequently analyzed websites
+// @Tags websites
+// @Accept json
+// @Produce json
+// @Param limit query int false "Number of websites to return" default(10)
+// @Success 200 {object} map[string]interface{} "Popular websites"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 500 {object} map[string]interface{} "Internal server error"
+// @Security BearerAuth
+// @Router /websites/popular [get]
+func (h *WebsiteHandler) GetPopularWebsites(c *fiber.Ctx) error {
+	// Parse limit parameter with default value
+	limit := 10
+	if c.Query("limit") != "" {
+		if limitParam, err := strconv.Atoi(c.Query("limit")); err == nil && limitParam > 0 {
+			limit = limitParam
+		}
+	}
+
+	// Use the new repository method with caching
+	websites, err := h.WebsiteRepo.FindPopularWebsites(limit)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch popular websites: " + err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    websites,
 	})
 }
