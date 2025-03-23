@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -127,34 +128,92 @@ func (a *StructureAnalyzer) analyzeDoctype(html string) {
 
 // analyzeSemanticTags проверяет использование семантических тегов
 func (a *StructureAnalyzer) analyzeSemanticTags(doc *goquery.Document) {
+	// Основные семантические теги и их важность
+	criticalTags := map[string]bool{
+		"header": true,
+		"main":   true,
+		"footer": true,
+	}
+
 	semanticTags := map[string]int{
-		"header":  doc.Find("header").Length(),
-		"footer":  doc.Find("footer").Length(),
-		"nav":     doc.Find("nav").Length(),
-		"main":    doc.Find("main").Length(),
-		"article": doc.Find("article").Length(),
-		"section": doc.Find("section").Length(),
-		"aside":   doc.Find("aside").Length(),
+		"header":     doc.Find("header").Length(),
+		"footer":     doc.Find("footer").Length(),
+		"nav":        doc.Find("nav").Length(),
+		"main":       doc.Find("main").Length(),
+		"article":    doc.Find("article").Length(),
+		"section":    doc.Find("section").Length(),
+		"aside":      doc.Find("aside").Length(),
+		"figure":     doc.Find("figure").Length(),
+		"figcaption": doc.Find("figcaption").Length(),
+		"time":       doc.Find("time").Length(),
 	}
 
 	a.SetMetric("semantic_tags", semanticTags)
 
 	// Подсчитываем количество используемых семантических тегов
 	usedSemanticTags := 0
-	for _, count := range semanticTags {
+	usedCriticalTags := 0
+	for tag, count := range semanticTags {
 		if count > 0 {
 			usedSemanticTags++
+			if criticalTags[tag] {
+				usedCriticalTags++
+			}
 		}
 	}
 
-	if usedSemanticTags < 3 { // Требуем хотя бы 3 разных семантических элемента
+	// Проверяем использование важных семантических тегов
+	missingCriticalTags := []string{}
+	for tag := range criticalTags {
+		if semanticTags[tag] == 0 {
+			missingCriticalTags = append(missingCriticalTags, tag)
+		}
+	}
+
+	// Проверяем вложенность семантических тегов
+	nestedSemanticIssues := 0
+	doc.Find("section").Each(func(i int, s *goquery.Selection) {
+		if s.Find("h1, h2, h3, h4, h5, h6").Length() == 0 {
+			nestedSemanticIssues++
+		}
+	})
+
+	doc.Find("article").Each(func(i int, s *goquery.Selection) {
+		if s.Find("h1, h2, h3, h4, h5, h6").Length() == 0 {
+			nestedSemanticIssues++
+		}
+	})
+
+	a.SetMetric("nested_semantic_issues", nestedSemanticIssues)
+
+	if len(missingCriticalTags) > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":         "missing_critical_semantic_tags",
+			"severity":     "high",
+			"description":  "Отсутствуют критически важные семантические элементы",
+			"missing_tags": missingCriticalTags,
+		})
+		a.AddRecommendation("Добавьте основные семантические элементы: " + strings.Join(missingCriticalTags, ", "))
+	}
+
+	if usedSemanticTags < 4 { // Требуем хотя бы 4 разных семантических элемента
 		a.AddIssue(map[string]interface{}{
 			"type":        "insufficient_semantic_html",
 			"severity":    "medium",
 			"description": "Недостаточное использование семантических HTML-элементов",
 			"used_tags":   usedSemanticTags,
 		})
-		a.AddRecommendation("Используйте больше семантических HTML-элементов (header, nav, main, article, section и т.д.)")
+		a.AddRecommendation("Используйте больше семантических HTML-элементов (header, nav, main, article, section, aside, figure, time и т.д.)")
+	}
+
+	if nestedSemanticIssues > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "semantic_nesting_issues",
+			"severity":    "medium",
+			"description": "Элементы section и article должны содержать заголовки",
+			"count":       nestedSemanticIssues,
+		})
+		a.AddRecommendation("Добавьте заголовки (h1-h6) в элементы section и article для улучшения структуры")
 	}
 }
 
@@ -171,6 +230,20 @@ func (a *StructureAnalyzer) analyzeHeadingStructure(doc *goquery.Document) {
 
 	a.SetMetric("heading_levels", headingLevels)
 
+	// Собираем содержимое заголовков для проверки дубликатов
+	headingContent := make(map[string][]string)
+	for level := 1; level <= 6; level++ {
+		headingTag := fmt.Sprintf("h%d", level)
+		content := []string{}
+
+		doc.Find(headingTag).Each(func(i int, s *goquery.Selection) {
+			text := strings.TrimSpace(s.Text())
+			content = append(content, text)
+		})
+
+		headingContent[headingTag] = content
+	}
+
 	// Проверка наличия H1
 	if headingLevels["h1"] == 0 {
 		a.AddIssue(map[string]interface{}{
@@ -180,35 +253,96 @@ func (a *StructureAnalyzer) analyzeHeadingStructure(doc *goquery.Document) {
 		})
 		a.AddRecommendation("Добавьте заголовок H1, который четко описывает основное содержание страницы")
 	} else if headingLevels["h1"] > 1 {
-		a.AddIssue(map[string]interface{}{
-			"type":        "multiple_h1",
-			"severity":    "medium",
-			"description": "На странице несколько заголовков H1",
-			"count":       headingLevels["h1"],
-		})
-		a.AddRecommendation("Используйте только один заголовок H1 на странице")
+		// Проверка дубликатов H1
+		h1Texts := headingContent["h1"]
+		duplicateH1 := map[string]int{}
+
+		for _, text := range h1Texts {
+			duplicateH1[text]++
+		}
+
+		duplicates := []string{}
+		for text, count := range duplicateH1 {
+			if count > 1 {
+				duplicates = append(duplicates, text)
+			}
+		}
+
+		if len(duplicates) > 0 {
+			a.AddIssue(map[string]interface{}{
+				"type":        "duplicate_h1_content",
+				"severity":    "high",
+				"description": "На странице есть дублирующиеся заголовки H1",
+				"duplicates":  duplicates,
+			})
+			a.AddRecommendation("Убедитесь, что каждый заголовок H1 уникален и описывает основное содержание страницы")
+		} else {
+			a.AddIssue(map[string]interface{}{
+				"type":        "multiple_h1",
+				"severity":    "medium",
+				"description": "На странице несколько заголовков H1",
+				"count":       headingLevels["h1"],
+			})
+			a.AddRecommendation("Используйте только один заголовок H1 на странице")
+		}
 	}
 
-	// Проверка порядка заголовков
+	// Проверка всей иерархии заголовков
 	headingsInOrder := true
-	if headingLevels["h1"] == 0 && (headingLevels["h2"] > 0 || headingLevels["h3"] > 0) {
+	skippedLevels := []string{}
+
+	// Проверяем порядок заголовков
+	if headingLevels["h1"] == 0 && (headingLevels["h2"] > 0 || headingLevels["h3"] > 0 ||
+		headingLevels["h4"] > 0 || headingLevels["h5"] > 0 ||
+		headingLevels["h6"] > 0) {
 		headingsInOrder = false
 		a.AddIssue(map[string]interface{}{
 			"type":        "heading_order",
 			"severity":    "medium",
-			"description": "H2/H3 используются без H1",
+			"description": "Заголовки используются без H1",
 		})
 		a.AddRecommendation("Начните иерархию заголовков с H1, затем используйте H2, H3 и т.д.")
 	}
 
-	if headingLevels["h2"] == 0 && headingLevels["h3"] > 0 {
-		headingsInOrder = false
+	// Проверка пропущенных уровней заголовков
+	for i := 1; i < 6; i++ {
+		currentTag := fmt.Sprintf("h%d", i)
+		nextTag := fmt.Sprintf("h%d", i+2)
+
+		if headingLevels[currentTag] > 0 && headingLevels[nextTag] > 0 && headingLevels[fmt.Sprintf("h%d", i+1)] == 0 {
+			headingsInOrder = false
+			skippedLevels = append(skippedLevels, fmt.Sprintf("h%d -> h%d", i, i+2))
+		}
+	}
+
+	if len(skippedLevels) > 0 {
 		a.AddIssue(map[string]interface{}{
-			"type":        "heading_skip",
-			"severity":    "low",
-			"description": "H3 используется без H2",
+			"type":        "skipped_heading_levels",
+			"severity":    "medium",
+			"description": "Пропущены уровни в иерархии заголовков",
+			"skipped":     skippedLevels,
 		})
-		a.AddRecommendation("Не пропускайте уровни в иерархии заголовков")
+		a.AddRecommendation("Не пропускайте уровни в иерархии заголовков. Используйте последовательную структуру (H1 -> H2 -> H3 и т.д.)")
+	}
+
+	// Проверка очень длинных заголовков
+	longHeadings := []string{}
+	doc.Find("h1, h2, h3, h4, h5, h6").Each(func(i int, s *goquery.Selection) {
+		text := strings.TrimSpace(s.Text())
+		if len(text) > 70 {
+			tag := goquery.NodeName(s)
+			longHeadings = append(longHeadings, fmt.Sprintf("%s (%d символов)", tag, len(text)))
+		}
+	})
+
+	if len(longHeadings) > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "long_headings",
+			"severity":    "low",
+			"description": "Слишком длинные заголовки на странице",
+			"headings":    longHeadings,
+		})
+		a.AddRecommendation("Сократите длинные заголовки для улучшения читаемости и SEO (рекомендуется до 70 символов)")
 	}
 
 	a.SetMetric("headings_in_order", headingsInOrder)

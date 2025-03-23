@@ -919,14 +919,12 @@ func (h *AnalysisHandler) HandleWebSocket(c *websocket.Conn) {
 	lastUpdateTime := time.Now()
 	var lastStatus string = analysis.Status
 
-	// Основной цикл отправки обновлений
 	for {
 		select {
 		case <-ticker.C:
-			// Обновляем данные анализа только если прошло достаточно времени с последнего обновления
 			now := time.Now()
 			if now.Sub(lastUpdateTime) < 2*time.Second && lastStatus != "completed" && lastStatus != "failed" {
-				continue // Skip update if too recent
+				continue
 			}
 
 			err = h.AnalysisRepo.FindByID(analysisID, &analysis)
@@ -939,12 +937,10 @@ func (h *AnalysisHandler) HandleWebSocket(c *websocket.Conn) {
 				return
 			}
 
-			// Отправляем обновление только если статус изменился
 			if analysis.Status != lastStatus {
 				lastUpdateTime = now
 				lastStatus = analysis.Status
 
-				// Отправляем текущий статус клиенту
 				if err := c.WriteJSON(fiber.Map{
 					"success": true,
 					"data": fiber.Map{

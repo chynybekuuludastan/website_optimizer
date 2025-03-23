@@ -2,6 +2,8 @@ package analyzer
 
 import (
 	"context"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
@@ -156,27 +158,6 @@ func (a *SEOAnalyzer) analyzeHeadings(data *parser.WebsiteData) {
 	}
 }
 
-// analyzeImages проверяет альтернативные тексты для изображений
-func (a *SEOAnalyzer) analyzeImages(data *parser.WebsiteData) {
-	missingAltTags := []string{}
-	for _, img := range data.Images {
-		if img.Alt == "" {
-			missingAltTags = append(missingAltTags, img.URL)
-		}
-	}
-	a.SetMetric("missing_alt_tags", missingAltTags)
-
-	if len(missingAltTags) > 0 {
-		a.AddIssue(map[string]interface{}{
-			"type":        "missing_alt",
-			"severity":    "medium",
-			"description": "Изображения без атрибута alt",
-			"count":       len(missingAltTags),
-		})
-		a.AddRecommendation("Добавьте информативный alt-текст ко всем изображениям")
-	}
-}
-
 // analyzeLinks анализирует внутренние и внешние ссылки
 func (a *SEOAnalyzer) analyzeLinks(data *parser.WebsiteData) {
 	internalLinks := 0
@@ -216,27 +197,6 @@ func (a *SEOAnalyzer) analyzeLinks(data *parser.WebsiteData) {
 			"description": "На странице нет внутренних ссылок",
 		})
 		a.AddRecommendation("Добавьте внутренние ссылки для улучшения навигации и индексации")
-	}
-}
-
-// analyzeCanonical проверяет canonical URL
-func (a *SEOAnalyzer) analyzeCanonical(data *parser.WebsiteData) {
-	canonicalURL := ""
-	for key, value := range data.MetaTags {
-		if key == "canonical" {
-			canonicalURL = value
-			break
-		}
-	}
-	a.SetMetric("canonical_url", canonicalURL)
-
-	if canonicalURL == "" {
-		a.AddIssue(map[string]interface{}{
-			"type":        "missing_canonical",
-			"severity":    "low",
-			"description": "На странице отсутствует канонический URL",
-		})
-		a.AddRecommendation("Добавьте канонический URL для предотвращения проблем с дублированным контентом")
 	}
 }
 
@@ -327,6 +287,7 @@ func (a *SEOAnalyzer) analyzeTitleAndDescription(data *parser.WebsiteData) {
 	a.SetMetric("missing_meta_title", missingMetaTitle)
 	a.SetMetric("meta_title_length", metaTitleLength)
 
+	// Анализ и рекомендации для title
 	if missingMetaTitle {
 		a.AddIssue(map[string]interface{}{
 			"type":        "missing_title",
@@ -334,18 +295,87 @@ func (a *SEOAnalyzer) analyzeTitleAndDescription(data *parser.WebsiteData) {
 			"description": "На странице отсутствует тег title",
 		})
 		a.AddRecommendation("Добавьте информативный title-тег на страницу")
-	} else if metaTitleLength < 30 || metaTitleLength > 60 {
-		a.AddIssue(map[string]interface{}{
-			"type":        "title_length",
-			"severity":    "medium",
-			"description": "Тег title либо слишком короткий, либо слишком длинный",
-			"current":     metaTitleLength,
-			"recommended": "30-60 символов",
-		})
+	} else {
+		// Проверка длины title
 		if metaTitleLength < 30 {
-			a.AddRecommendation("Сделайте title-тег более информативным (минимум 30 символов)")
-		} else {
-			a.AddRecommendation("Сократите title-тег (рекомендуется максимум 60 символов)")
+			a.AddIssue(map[string]interface{}{
+				"type":        "title_too_short",
+				"severity":    "medium",
+				"description": "Тег title слишком короткий",
+				"current":     metaTitleLength,
+				"recommended": "30-60 символов",
+			})
+			a.AddRecommendation("Сделайте title-тег более информативным (рекомендуется 30-60 символов)")
+		} else if metaTitleLength > 60 {
+			a.AddIssue(map[string]interface{}{
+				"type":        "title_too_long",
+				"severity":    "medium",
+				"description": "Тег title слишком длинный",
+				"current":     metaTitleLength,
+				"recommended": "30-60 символов",
+			})
+			a.AddRecommendation("Сократите title-тег (рекомендуется максимум 60 символов для полного отображения в результатах поиска)")
+		}
+
+		// Проверка наличия ключевых слов в title
+		if data.TextContent != "" && metaTitleLength > 0 {
+			// Получаем потенциальные ключевые слова из контента
+			words := strings.Fields(strings.ToLower(data.TextContent))
+			wordCount := make(map[string]int)
+
+			for _, word := range words {
+				if len(word) > 3 && !isStopWord(word) {
+					word = strings.Trim(word, ".,?!:;()")
+					if word != "" {
+						wordCount[word]++
+					}
+				}
+			}
+
+			// Определяем топ 3 ключевых слова
+			type WordFreq struct {
+				Word  string
+				Count int
+			}
+
+			wordFreqs := []WordFreq{}
+			for word, count := range wordCount {
+				if count >= 3 {
+					wordFreqs = append(wordFreqs, WordFreq{word, count})
+				}
+			}
+
+			// Сортируем по частоте
+			sort.Slice(wordFreqs, func(i, j int) bool {
+				return wordFreqs[i].Count > wordFreqs[j].Count
+			})
+
+			// Берем топ-3 или меньше, если доступно меньше
+			topKeywords := []string{}
+			for i := 0; i < len(wordFreqs) && i < 3; i++ {
+				topKeywords = append(topKeywords, wordFreqs[i].Word)
+			}
+
+			// Проверяем наличие в title
+			keywordsInTitle := false
+			titleLower := strings.ToLower(data.Title)
+
+			for _, keyword := range topKeywords {
+				if strings.Contains(titleLower, keyword) {
+					keywordsInTitle = true
+					break
+				}
+			}
+
+			if !keywordsInTitle && len(topKeywords) > 0 {
+				a.AddIssue(map[string]interface{}{
+					"type":        "no_keywords_in_title",
+					"severity":    "medium",
+					"description": "В title отсутствуют ключевые слова из контента",
+					"keywords":    topKeywords,
+				})
+				a.AddRecommendation("Добавьте в title основные ключевые слова из контента: " + strings.Join(topKeywords, ", "))
+			}
 		}
 	}
 
@@ -360,25 +390,163 @@ func (a *SEOAnalyzer) analyzeTitleAndDescription(data *parser.WebsiteData) {
 	a.SetMetric("missing_meta_description", missingMetaDesc)
 	a.SetMetric("meta_description_length", metaDescLength)
 
+	// Анализ и рекомендации для description
 	if missingMetaDesc {
 		a.AddIssue(map[string]interface{}{
 			"type":        "missing_description",
 			"severity":    "high",
 			"description": "На странице отсутствует мета-тег description",
 		})
-		a.AddRecommendation("Добавьте мета-тег description с кратким описанием содержания страницы")
-	} else if metaDescLength < 50 || metaDescLength > 160 {
-		a.AddIssue(map[string]interface{}{
-			"type":        "description_length",
-			"severity":    "medium",
-			"description": "Мета-тег description либо слишком короткий, либо слишком длинный",
-			"current":     metaDescLength,
-			"recommended": "50-160 символов",
-		})
+		a.AddRecommendation("Добавьте мета-тег description с кратким описанием содержания страницы (рекомендуется 50-160 символов)")
+	} else {
+		// Проверка длины description
 		if metaDescLength < 50 {
-			a.AddRecommendation("Сделайте мета-тег description более информативным (минимум 50 символов)")
-		} else {
-			a.AddRecommendation("Сократите мета-тег description (рекомендуется максимум 160 символов)")
+			a.AddIssue(map[string]interface{}{
+				"type":        "description_too_short",
+				"severity":    "medium",
+				"description": "Мета-тег description слишком короткий",
+				"current":     metaDescLength,
+				"recommended": "50-160 символов",
+			})
+			a.AddRecommendation("Сделайте мета-тег description более информативным (рекомендуется 50-160 символов)")
+		} else if metaDescLength > 160 {
+			a.AddIssue(map[string]interface{}{
+				"type":        "description_too_long",
+				"severity":    "medium",
+				"description": "Мета-тег description слишком длинный",
+				"current":     metaDescLength,
+				"recommended": "50-160 символов",
+			})
+			a.AddRecommendation("Сократите мета-тег description до 160 символов для оптимального отображения в результатах поиска")
 		}
 	}
+}
+
+// analyzeCanonical проверяет canonical URL
+func (a *SEOAnalyzer) analyzeCanonical(data *parser.WebsiteData) {
+	canonicalURL := ""
+	for key, value := range data.MetaTags {
+		if key == "canonical" {
+			canonicalURL = value
+			break
+		}
+	}
+	a.SetMetric("canonical_url", canonicalURL)
+
+	if canonicalURL == "" {
+		a.AddIssue(map[string]interface{}{
+			"type":        "missing_canonical",
+			"severity":    "medium",
+			"description": "На странице отсутствует канонический URL",
+		})
+		a.AddRecommendation("Добавьте канонический URL для предотвращения проблем с дублированным контентом")
+	} else {
+		// Проверяем, является ли URL относительным
+		isRelative := !strings.HasPrefix(canonicalURL, "http://") && !strings.HasPrefix(canonicalURL, "https://")
+
+		if isRelative {
+			a.AddIssue(map[string]interface{}{
+				"type":        "relative_canonical",
+				"severity":    "low",
+				"description": "Канонический URL задан в относительном формате",
+				"url":         canonicalURL,
+			})
+			a.AddRecommendation("Рекомендуется использовать абсолютный URL в каноническом теге для предотвращения потенциальных проблем")
+		}
+
+		// Проверяем соответствие текущему URL
+		currentURL := data.URL
+		if currentURL != "" && canonicalURL != "" &&
+			!isRelative && currentURL != canonicalURL &&
+			!strings.HasSuffix(currentURL, "/") && canonicalURL != currentURL+"/" {
+			a.AddIssue(map[string]interface{}{
+				"type":        "canonical_mismatch",
+				"severity":    "medium",
+				"description": "Канонический URL не соответствует URL страницы",
+				"current":     currentURL,
+				"canonical":   canonicalURL,
+			})
+			a.AddRecommendation("Убедитесь, что канонический URL правильно указывает на текущую страницу, если это основная версия контента")
+		}
+	}
+}
+
+// analyzeImages проверяет альтернативные тексты для изображений
+func (a *SEOAnalyzer) analyzeImages(data *parser.WebsiteData) {
+	// Проблемы с alt-текстами
+	missingAlt := []map[string]string{}
+	tooShortAlt := []map[string]string{}
+	suspiciousAlt := []map[string]string{}
+
+	for _, img := range data.Images {
+		if img.Alt == "" {
+			missingAlt = append(missingAlt, map[string]string{
+				"url": img.URL,
+				// "location": img.Location, // Removed as img.Location does not exist
+			})
+		} else if len(img.Alt) < 5 {
+			tooShortAlt = append(tooShortAlt, map[string]string{
+				"url": img.URL,
+				"alt": img.Alt,
+			})
+		} else {
+			// Проверяем на подозрительные alt-тексты (например, просто имя файла)
+			fileName := filepath.Base(img.URL)
+			fileNameWithoutExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+
+			if strings.Contains(img.Alt, fileNameWithoutExt) ||
+				strings.Contains(strings.ToLower(img.Alt), "image") ||
+				strings.Contains(strings.ToLower(img.Alt), "picture") {
+				suspiciousAlt = append(suspiciousAlt, map[string]string{
+					"url": img.URL,
+					"alt": img.Alt,
+				})
+			}
+		}
+	}
+
+	a.SetMetric("images_missing_alt", len(missingAlt))
+	a.SetMetric("images_too_short_alt", len(tooShortAlt))
+	a.SetMetric("images_suspicious_alt", len(suspiciousAlt))
+
+	if len(missingAlt) > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "missing_alt",
+			"severity":    "medium",
+			"description": "Изображения без атрибута alt",
+			"count":       len(missingAlt),
+			"images":      missingAlt[:min(len(missingAlt), 5)], // Показываем до 5 примеров
+		})
+		a.AddRecommendation("Добавьте информативный alt-текст ко всем изображениям для улучшения доступности и SEO")
+	}
+
+	if len(tooShortAlt) > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "too_short_alt",
+			"severity":    "low",
+			"description": "Изображения со слишком коротким атрибутом alt",
+			"count":       len(tooShortAlt),
+			"images":      tooShortAlt[:min(len(tooShortAlt), 5)], // Показываем до 5 примеров
+		})
+		a.AddRecommendation("Сделайте alt-текст более описательным (рекомендуется 5-125 символов)")
+	}
+
+	if len(suspiciousAlt) > 0 {
+		a.AddIssue(map[string]interface{}{
+			"type":        "suspicious_alt",
+			"severity":    "low",
+			"description": "Изображения с подозрительным alt-текстом (содержит имя файла или общие слова)",
+			"count":       len(suspiciousAlt),
+			"images":      suspiciousAlt[:min(len(suspiciousAlt), 5)], // Показываем до 5 примеров
+		})
+		a.AddRecommendation("Сделайте alt-тексты более осмысленными и описательными, не используйте имя файла или общие слова, как 'image', 'picture'")
+	}
+}
+
+// min возвращает минимальное из двух чисел
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

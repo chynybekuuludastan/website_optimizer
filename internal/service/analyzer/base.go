@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/chynybekuuludastan/website_optimizer/internal/service/lighthouse"
 	"github.com/chynybekuuludastan/website_optimizer/internal/service/parser"
 )
 
@@ -169,6 +170,22 @@ func extractAuditsData(lighthouseResults map[string]interface{}, auditTypes map[
 				}
 			}
 		}
+	}
+
+	return result
+}
+
+// extractAuditsData извлекает данные аудитов по заданному типу
+func extractLighthouseAuditsData(audits map[string]lighthouse.Audit, auditTypes map[string]bool) map[string]lighthouse.Audit {
+	result := make(map[string]lighthouse.Audit)
+
+	for id, audit := range audits {
+		// Проверяем, относится ли этот аудит к интересующим нас типам
+		if !auditTypes[id] {
+			continue
+		}
+
+		result[id] = audit
 	}
 
 	return result
