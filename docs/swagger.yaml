@@ -7,6 +7,20 @@ definitions:
     required:
     - url
     type: object
+  handlers.CodeSnippetRequest:
+    properties:
+      language:
+        type: string
+      provider:
+        type: string
+      snippet_types:
+        description: Types of snippets to generate (e.g., html, css, js)
+        items:
+          type: string
+        type: array
+      target_audience:
+        type: string
+    type: object
   handlers.ContentImprovementRequest:
     properties:
       language:
@@ -126,6 +140,93 @@ paths:
       summary: Create a new website analysis
       tags:
       - analysis
+  /analysis/{id}/code-snippets:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve all generated code snippets for a specific analysis
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Code snippets retrieved successfully
+          schema:
+            $ref: '#/definitions/handlers.SuccessResponse'
+        "400":
+          description: Invalid analysis ID
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Analysis not found
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "500":
+          description: Failed to fetch code snippets
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get code snippets for an analysis
+      tags:
+      - code-snippets
+    post:
+      consumes:
+      - application/json
+      description: Generate code snippets based on analysis results
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Code generation request parameters
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.CodeSnippetRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Code snippet generation initiated
+          schema:
+            $ref: '#/definitions/handlers.SuccessResponse'
+        "400":
+          description: Invalid request
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Analysis not found
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "500":
+          description: Server error
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Generate code snippets
+      tags:
+      - code-snippets
   /analysis/{id}/content-html:
     get:
       consumes:
@@ -283,6 +384,50 @@ paths:
       summary: Cancel content generation
       tags:
       - content-improvements
+  /analysis/{id}/issues:
+    get:
+      consumes:
+      - application/json
+      description: Returns all issues found during analysis
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Analysis issues
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid analysis ID
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Analysis not found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get issues for an analysis
+      tags:
+      - analysis
   /analysis/{id}/metadata:
     patch:
       consumes:
@@ -332,6 +477,99 @@ paths:
       security:
       - BearerAuth: []
       summary: Update analysis metadata
+      tags:
+      - analysis
+  /analysis/{id}/metrics:
+    get:
+      consumes:
+      - application/json
+      description: Returns all metrics for a specific analysis
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Analysis metrics
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid analysis ID
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Analysis not found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get all metrics for an analysis
+      tags:
+      - analysis
+  /analysis/{id}/metrics/{category}:
+    get:
+      consumes:
+      - application/json
+      description: Returns metrics for a specific analysis category
+      parameters:
+      - description: Analysis ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Metric category
+        in: path
+        name: category
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Metrics for the specified category
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid analysis ID
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Analysis or category not found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get metrics by category
       tags:
       - analysis
   /analysis/{id}/score:

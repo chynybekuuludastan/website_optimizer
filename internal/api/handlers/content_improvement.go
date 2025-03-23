@@ -77,6 +77,14 @@ type ErrorResponse struct {
 	Error   string `json:"error" example:"Something went wrong"`
 }
 
+// CodeSnippetRequest represents a request for code snippet generation
+type CodeSnippetRequest struct {
+	TargetAudience string   `json:"target_audience"`
+	Language       string   `json:"language,omitempty"`
+	ProviderName   string   `json:"provider"`
+	SnippetTypes   []string `json:"snippet_types,omitempty"` // Types of snippets to generate (e.g., html, css, js)
+}
+
 // @Summary Request new content improvement
 // @Description Generate new content improvements using LLM for a specific analysis
 // @Tags content-improvements
@@ -498,4 +506,338 @@ func (h *ContentImprovementHandler) CancelContentGeneration(c *fiber.Ctx) error 
 		"success": true,
 		"message": "Content generation cancelled",
 	})
+}
+
+// GetCodeSnippets retrieves all generated code snippets for an analysis
+// @Summary Get code snippets for an analysis
+// @Description Retrieve all generated code snippets for a specific analysis
+// @Tags code-snippets
+// @Accept json
+// @Produce json
+// @Param id path string true "Analysis ID" format="uuid"
+// @Success 200 {object} handlers.SuccessResponse "Code snippets retrieved successfully"
+// @Failure 400 {object} handlers.ErrorResponse "Invalid analysis ID"
+// @Failure 401 {object} handlers.ErrorResponse "Unauthorized"
+// @Failure 404 {object} handlers.ErrorResponse "Analysis not found"
+// @Failure 500 {object} handlers.ErrorResponse "Failed to fetch code snippets"
+// @Security BearerAuth
+// @Router /analysis/{id}/code-snippets [get]
+func (h *ContentImprovementHandler) GetCodeSnippets(c *fiber.Ctx) error {
+	// Get analysis ID from path
+	id := c.Params("id")
+	analysisID, err := uuid.Parse(id)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid analysis ID",
+		})
+	}
+
+	// Create a cache key
+	cacheKey := "code_snippets:" + analysisID.String()
+
+	// Try to get from cache if Redis is available
+	if h.RedisClient != nil {
+		var cachedResponse map[string]interface{}
+		err := h.RedisClient.Get(cacheKey, &cachedResponse)
+		if err == nil && cachedResponse != nil {
+			return c.JSON(fiber.Map{
+				"success": true,
+				"data":    cachedResponse,
+				"cached":  true,
+			})
+		}
+	}
+
+	// Get content improvements with different snippet types
+	codeSnippets, err := h.ContentImproveRepo.FindByElementType(analysisID, "code")
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch code snippets",
+		})
+	}
+
+	htmlSnippets, err := h.ContentImproveRepo.FindByElementType(analysisID, "html")
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch HTML snippets",
+		})
+	}
+
+	cssSnippets, err := h.ContentImproveRepo.FindByElementType(analysisID, "css")
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch CSS snippets",
+		})
+	}
+
+	jsSnippets, err := h.ContentImproveRepo.FindByElementType(analysisID, "js")
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch JS snippets",
+		})
+	}
+
+	// Combine all snippet types
+	allSnippets := append(append(append(codeSnippets, htmlSnippets...), cssSnippets...), jsSnippets...)
+
+	// Check if analysis exists (only if no snippets found)
+	if len(allSnippets) == 0 {
+		var analysis models.Analysis
+		if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"success": false,
+				"error":   "Analysis not found",
+			})
+		}
+
+		// Analysis exists but no snippets yet
+		noSnippetsResponse := fiber.Map{
+			"snippets": map[string]string{},
+			"status":   "not_generated",
+		}
+
+		// Cache this response briefly
+		if h.RedisClient != nil {
+			h.RedisClient.Set(cacheKey, noSnippetsResponse, 1*time.Minute) // Short cache - only 1 minute
+		}
+
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data":    noSnippetsResponse,
+		})
+	}
+
+	// Format response
+	snippets := make(map[string]string)
+	createdAt := allSnippets[0].CreatedAt
+	model := allSnippets[0].LLMModel
+
+	for _, snippet := range allSnippets {
+		snippets[snippet.ElementType] = snippet.ImprovedContent
+
+		// Use the most recent snippet's timestamp and model
+		if snippet.CreatedAt.After(createdAt) {
+			createdAt = snippet.CreatedAt
+			model = snippet.LLMModel
+		}
+	}
+
+	responseData := fiber.Map{
+		"snippets":   snippets,
+		"status":     "completed",
+		"model":      model,
+		"created_at": createdAt,
+	}
+
+	// Cache the response
+	if h.RedisClient != nil {
+		h.RedisClient.Set(cacheKey, responseData, 1*time.Hour) // Cache for 1 hour
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    responseData,
+	})
+}
+
+// GenerateCodeSnippets generates code snippets based on analysis results
+// @Summary Generate code snippets
+// @Description Generate code snippets based on analysis results
+// @Tags code-snippets
+// @Accept json
+// @Produce json
+// @Param id path string true "Analysis ID" format="uuid"
+// @Param request body handlers.CodeSnippetRequest true "Code generation request parameters"
+// @Success 202 {object} handlers.SuccessResponse "Code snippet generation initiated"
+// @Failure 400 {object} handlers.ErrorResponse "Invalid request"
+// @Failure 401 {object} handlers.ErrorResponse "Unauthorized"
+// @Failure 403 {object} handlers.ErrorResponse "Forbidden"
+// @Failure 404 {object} handlers.ErrorResponse "Analysis not found"
+// @Failure 500 {object} handlers.ErrorResponse "Server error"
+// @Security BearerAuth
+// @Router /analysis/{id}/code-snippets [post]
+func (h *ContentImprovementHandler) GenerateCodeSnippets(c *fiber.Ctx) error {
+	// Get analysis ID from path
+	id := c.Params("id")
+	analysisID, err := uuid.Parse(id)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid analysis ID",
+		})
+	}
+
+	// Check if there's already an active generation for this analysis
+	if _, exists := h.activeRequests.Load(analysisID.String()); exists {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success": false,
+			"error":   "Content generation already in progress",
+		})
+	}
+
+	// Parse request body
+	req := new(CodeSnippetRequest)
+	if err := c.BodyParser(req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid request body: " + err.Error(),
+		})
+	}
+
+	// Check if analysis exists
+	var analysis models.Analysis
+	if err := h.AnalysisRepo.FindByID(analysisID, &analysis); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "Analysis not found",
+		})
+	}
+
+	// Check if analysis is completed
+	if analysis.Status != "completed" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Analysis is not completed yet",
+			"status":  analysis.Status,
+		})
+	}
+
+	// Get website data
+	var website models.Website
+	if err := h.WebsiteRepo.FindByID(analysis.WebsiteID, &website); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch website data",
+		})
+	}
+
+	// Get metrics data for analysis results
+	metrics, err := h.MetricsRepo.FindByAnalysisID(analysisID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch analysis metrics",
+		})
+	}
+
+	// Extract analysis results
+	analysisResults := llm.ExtractAnalysisResults(metrics)
+
+	// Create a ContentRequest
+	contentRequest := &llm.ContentRequest{
+		URL:             website.URL,
+		Title:           website.Title,
+		CTAText:         "Learn More", // Default value
+		Content:         website.Description,
+		AnalysisResults: analysisResults,
+		Language:        req.Language,
+		TargetAudience:  req.TargetAudience,
+	}
+
+	// Mark this analysis ID as having an active request
+	h.activeRequests.Store(analysisID.String(), true)
+
+	// Start code generation in the background
+	go func() {
+		defer h.activeRequests.Delete(analysisID.String())
+		h.generateCodeSnippets(analysisID, contentRequest, req.ProviderName, req.SnippetTypes)
+	}()
+
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"success": true,
+		"message": "Code snippet generation started",
+		"data": fiber.Map{
+			"analysis_id": analysisID,
+			"status":      "processing",
+		},
+	})
+}
+
+// generateCodeSnippets handles the background generation of code snippets
+func (h *ContentImprovementHandler) generateCodeSnippets(
+	analysisID uuid.UUID,
+	request *llm.ContentRequest,
+	providerName string,
+	snippetTypes []string,
+) {
+	// Set timeout for generation
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Validate provider
+	if providerName == "" {
+		// List available providers
+		providers := h.LLMService.GetAvailableProviders()
+		if len(providers) > 0 {
+			providerName = providers[0]
+		} else {
+			fmt.Println("No LLM providers available")
+			return
+		}
+	}
+
+	// If no snippet types specified, default to HTML and CSS
+	if len(snippetTypes) == 0 {
+		snippetTypes = []string{"html", "css"}
+	}
+
+	// Generate each requested snippet type
+	for _, snippetType := range snippetTypes {
+		// Generate the snippet
+		snippet, err := h.generateSnippet(ctx, request, providerName, snippetType)
+		if err != nil {
+			fmt.Printf("Error generating %s snippet: %v\n", snippetType, err)
+			continue
+		}
+
+		// Save the snippet
+		improvement := models.ContentImprovement{
+			AnalysisID:      analysisID,
+			ElementType:     snippetType,
+			OriginalContent: request.Content,
+			ImprovedContent: snippet,
+			LLMModel:        providerName,
+		}
+
+		if err := h.ContentImproveRepo.Create(&improvement); err != nil {
+			fmt.Printf("Error saving %s snippet: %v\n", snippetType, err)
+		}
+	}
+}
+
+func (h *ContentImprovementHandler) generateSnippet(
+	ctx context.Context,
+	request *llm.ContentRequest,
+	providerName string,
+	snippetType string,
+) (string, error) {
+	// For HTML, we can use the existing HTML generation
+	if snippetType == "html" {
+		// First generate the content if we don't have it yet
+		contentResponse, err := h.LLMService.GenerateContent(ctx, request, providerName)
+		if err != nil {
+			return "", fmt.Errorf("failed to generate content: %w", err)
+		}
+
+		// Then generate HTML
+		html, err := h.LLMService.GenerateHTML(ctx, request, contentResponse, providerName)
+		if err != nil {
+			return "", fmt.Errorf("failed to generate HTML: %w", err)
+		}
+
+		return html, nil
+	}
+
+	// For other snippet types, create a custom prompt based on the snippet type
+	prompt := fmt.Sprintf("Based on the website %s with title '%s', generate a %s code snippet that would improve the site.", request.URL, request.Title, snippetType)
+	// TODO: This is a simplified approach. In a real implementation, you'd:
+	// 1. Use a specialized prompt for each snippet type
+	// 2. Implement proper handling in the LLM service
+
+	return prompt, nil
 }

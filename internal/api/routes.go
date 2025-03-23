@@ -87,13 +87,17 @@ func SetupRoutes(app *fiber.App, db *database.DatabaseClient, redisClient *datab
 	websites.Delete("/:id", middleware.AnalystOrAdmin(), websiteHandler.DeleteWebsite)
 
 	// Analysis routes
+	// Setup additional analysis routes
 	analysis := api.Group("/analysis")
 	analysis.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.CreateAnalysis)
 	analysis.Get("/latest", middleware.JWTMiddleware(cfg), analysisHandler.GetLatestAnalyses)
 	analysis.Get("/statistics", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), analysisHandler.GetAnalyticsStatistics)
 
-	// Protected analysis routes
+	// Protected analysis routes with appropriate authorization
 	protectedAnalysis := analysis.Group("/:id", middleware.JWTMiddleware(cfg))
+	protectedAnalysis.Get("/metrics", middleware.AnalystOrAdmin(), analysisHandler.GetAnalysisMetrics)
+	protectedAnalysis.Get("/metrics/:category", middleware.AnalystOrAdmin(), analysisHandler.GetAnalysisMetricsByCategory)
+	protectedAnalysis.Get("/issues", middleware.AnalystOrAdmin(), analysisHandler.GetAnalysisIssues)
 	protectedAnalysis.Get("/score", analysisHandler.GetOverallScore)
 	protectedAnalysis.Get("/summary/:category", analysisHandler.GetCategorySummary)
 	protectedAnalysis.Patch("/metadata", middleware.AnalystOrAdmin(), analysisHandler.UpdateMetadata)
@@ -119,14 +123,6 @@ func setupLLMRoutes(apiGroup fiber.Router, repoFactory *repository.Factory, redi
 		DefaultTimeout:  2 * time.Minute, // Set a reasonable timeout
 	})
 
-	// Register providers
-	// if cfg.OpenAIAPIKey != "" {
-	// 	openaiProvider, err := providers.NewOpenAIProvider(cfg.OpenAIAPIKey, "gpt-4", nil)
-	// 	if err == nil {
-	// 		llmService.RegisterProvider(openaiProvider)
-	// 	}
-	// }
-
 	// Create Gemini provider if config exists
 	geminiProvider, err := providers.NewGeminiProvider(cfg.GeminiAPIKey, "gemini-1.5-flash", nil)
 	if err == nil {
@@ -141,6 +137,10 @@ func setupLLMRoutes(apiGroup fiber.Router, repoFactory *repository.Factory, redi
 	contentRoutes.Get("/", middleware.JWTMiddleware(cfg), contentHandler.GetContentImprovements)
 	contentRoutes.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), contentHandler.RequestContentImprovement)
 	contentRoutes.Post("/cancel", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), contentHandler.CancelContentGeneration)
+	// Set up code snippet routes
+	codeSnippetRoutes := apiGroup.Group("/analysis/:id/code-snippets")
+	codeSnippetRoutes.Get("/", middleware.JWTMiddleware(cfg), contentHandler.GetCodeSnippets)
+	codeSnippetRoutes.Post("/", middleware.JWTMiddleware(cfg), middleware.AnalystOrAdmin(), contentHandler.GenerateCodeSnippets)
 
 	// HTML content route
 	apiGroup.Get("/analysis/:id/content-html", middleware.JWTMiddleware(cfg), contentHandler.GetContentHTML)
